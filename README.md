@@ -156,7 +156,7 @@ wsl -d Ubuntu -e bash -lc 'cd /mnt/d/projects/trackergg && bash scripts/build.sh
 
 ```powershell
 powershell -File scripts\package.ps1
-# dist\release\valtrack-v0.1.1-win64.zip + SHA256SUMS.txt
+# dist\release\valtrack-v*-win64.zip + SHA256SUMS.txt
 ```
 
 ## 사용
@@ -167,8 +167,27 @@ valtrack.exe whoami     # puuid / region / 클라이언트 버전 / 내 티어
 valtrack.exe watch      # 로비가 바뀔 때만 다시 출력
 valtrack.exe overlay    # 게임 위에 항상-위 오버레이 (클릭 통과, Alt+T 토글)
 valtrack.exe overlay --demo   # 게임 없이 오버레이 렌더 확인
+valtrack.exe agent      # VALORANT 실행 중에만 오버레이를 띄우는 감시자
+valtrack.exe agent --stop
+valtrack.exe autostart  # 로그인 시 agent 자동 시작 (HKCU Run)
+valtrack.exe autostart --remove
 valtrack.exe --json live
 ```
+
+### 게임 실행/종료에 맞추기
+
+`agent`는 창·트레이·HTTP가 없는 감시자다. 2초마다 프로세스 목록만 확인해서
+`VALORANT.exe`가 뜨면 `valtrack.exe overlay`를 자식으로 띄우고, 게임이 끝나면 그 자식을
+종료시킨다. Riot API를 직접 호출하지 않으므로 유휴 비용은 프로세스 스냅샷 1회/2초뿐이다.
+`agent --stop`으로 끄고, `autostart`로 로그인 시 자동 시작을 등록한다(레지스트리
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).
+
+### 업데이트 확인
+
+하루 1회 `api.github.com`에서 최신 릴리스 태그를 확인하고, 새 버전이 있으면 트레이
+알림과 메뉴 항목(`새 버전 vX.Y.Z 열기`)으로 알린다. 자동 교체는 하지 않는다(실행 중인 exe를
+덮어쓰려면 별도 헬퍼가 필요하고, 검증되지 않은 바이너리를 받아 실행하는 편이 더 위험하다).
+끄려면 `VALTRACK_NO_UPDATE=1`. 이 확인은 로컬 Riot API 외에 유일한 외부 요청이다.
 
 오버레이는 매치가 잡히면 자동으로 뜨고, **Alt+T** 로 숨김/복원한다.
 매치가 끝나면 자동으로 숨는다. 마우스 입력은 통과시킨다(`WS_EX_TRANSPARENT`).
@@ -187,6 +206,8 @@ YOUR TEAM
 ```
 
 오버레이는 요원/티어 아이콘 + `Lv` + `WR` + 파티 뱃지를 한 줄에 보여준다.
+스트리머 모드(인코그니토) 플레이어는 이름 옆에 `[S]`가 붙고, 계정 레벨을 숨긴
+플레이어는 `레벨 -`로 표시한다(클라이언트가 실제로 제공하는 값만 그대로 반영).
 
 ## 한계 / 안전
 
@@ -220,7 +241,7 @@ YOUR TEAM
 격리 전에 체크섬을 먼저 확인한다:
 
 ```powershell
-Get-FileHash .\valtrack-v0.1.1-win64.zip -Algorithm SHA256
+Get-FileHash .\valtrack-v*-win64.zip -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 

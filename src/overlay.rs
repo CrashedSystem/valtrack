@@ -27,6 +27,7 @@ use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, MOD_ALT, VK_Q, VK_T};
 use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY,
     NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -43,10 +44,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const WM_REFRESH: u32 = WM_APP + 1;
 const WM_TRAY: u32 = WM_APP + 2;
+const WM_UPDATE: u32 = WM_APP + 3;
 
 const TRAY_ID: u32 = 1;
 const MENU_TOGGLE: usize = 1;
 const MENU_QUIT: usize = 2;
+const MENU_UPDATE: usize = 3;
 
 const WIDTH: i32 = 540;
 const HEIGHT: i32 = 636;
@@ -127,6 +130,8 @@ static HAD_MATCH: AtomicBool = AtomicBool::new(false);
 /// the small "waiting" panel instead of an invisible window.
 static WAITING: AtomicBool = AtomicBool::new(false);
 static TRAY_ADDED: AtomicBool = AtomicBool::new(false);
+/// Newer release detected by the background check, if any.
+static UPDATE_AVAILABLE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 struct Cache {
     match_id: String,
@@ -165,6 +170,8 @@ fn demo_view() -> View {
         is_me: false,
         name: n.to_string(),
         level: lv,
+        incognito: n == "hidden",
+        hide_level: n == "hidden",
         rank: String::new(),
         agent: agent.to_string(),
         agent_id: agent_id.to_string(),
@@ -199,6 +206,47 @@ fn demo_view() -> View {
 
 fn hwnd_slot() -> &'static Mutex<isize> {
     HWND_SLOT.get_or_init(|| Mutex::new(0))
+}
+
+fn update_slot() -> &'static Mutex<Option<String>> {
+    UPDATE_AVAILABLE.get_or_init(|| Mutex::new(None))
+}
+
+/// Tray balloon. Separate from `add_tray` because a NIM_MODIFY with NIF_INFO
+/// reuses the registered icon instead of creating a second one.
+unsafe fn balloon(hwnd: HWND, title: &str, text: &str) {
+    if !TRAY_ADDED.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = TRAY_ID;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO;
+    for (i, c) in wide(title).iter().take(63).enumerate() {
+        nid.szInfoTitle[i] = *c;
+    }
+    for (i, c) in wide(text).iter().take(255).enumerate() {
+        nid.szInfo[i] = *c;
+    }
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+/// Runs the release check off the UI thread; the window wakes on `WM_UPDATE`.
+fn spawn_update_check(hwnd: HWND) {
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    crate::update::spawn(tx);
+    let slot = hwnd as isize;
+    std::thread::spawn(move || {
+        // Bounded wait: a hung check must not leave a thread around forever.
+        if let Ok(version) = rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            *update_slot().lock().unwrap() = Some(version);
+            unsafe {
+                PostMessageW(slot as HWND, WM_UPDATE, 0, 0);
+            }
+        }
+    });
 }
 
 /// Toggle the overlay. With no match running there is nothing to draw, so flip
@@ -277,6 +325,16 @@ unsafe fn tray_menu(hwnd: HWND) {
         VISIBLE.load(Ordering::Relaxed) && (state().lock().unwrap().is_some() || WAITING.load(Ordering::Relaxed));
     let label = if shown { "숨기기  (Alt+T)" } else { "표시  (Alt+T)" };
     AppendMenuW(menu, MF_STRING, MENU_TOGGLE, wide(label).as_ptr());
+    // Only present when the background check actually found a newer build.
+    let pending = update_slot().lock().unwrap().clone();
+    if let Some(version) = &pending {
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            MENU_UPDATE,
+            wide(&format!("새 버전 v{version} 열기")).as_ptr(),
+        );
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
     AppendMenuW(menu, MF_STRING, MENU_QUIT, wide("종료  (Alt+Q)").as_ptr());
 
@@ -297,6 +355,11 @@ unsafe fn tray_menu(hwnd: HWND) {
 
     match cmd as usize {
         MENU_TOGGLE => toggle(hwnd),
+        MENU_UPDATE => {
+            if let Err(err) = crate::update::open_releases() {
+                crate::log(&format!("open releases failed: {err:#}"));
+            }
+        }
         MENU_QUIT => {
             DestroyWindow(hwnd);
         }
@@ -690,7 +753,14 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         bottom: y + 26,
     };
     let name_color = if row.is_me { ACCENT } else { WHITE };
-    draw_text(hdc, f_name, &row.name, &mut name_rc, name_color, DT_LEFT);
+    // `[S]` = streamer/incognito mode: the client hides this identity from
+    // everyone else, so we mark it instead of pretending the name is reliable.
+    let name_text = if row.incognito {
+        format!("{}  [S]", row.name)
+    } else {
+        row.name.clone()
+    };
+    draw_text(hdc, f_name, &name_text, &mut name_rc, name_color, DT_LEFT);
 
     let mut parts = Vec::new();
     if let Some(ko) = crate::l10n::agent_ko(&row.agent_id) {
@@ -698,7 +768,11 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
     } else if !row.agent.is_empty() {
         parts.push(row.agent.clone());
     }
-    parts.push(format!("레벨 {}", row.level));
+    if row.hide_level {
+        parts.push("레벨 -".to_string());
+    } else {
+        parts.push(format!("레벨 {}", row.level));
+    }
     if row.games > 0 {
         parts.push(format!(
             "승률 {}%",
@@ -825,6 +899,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             0
         }
+        WM_UPDATE => {
+            if let Some(version) = update_slot().lock().unwrap().clone() {
+                crate::log(&format!("update available: v{version}"));
+                balloon(
+                    hwnd,
+                    "valtrack 새 버전",
+                    &format!("v{version} 사용 가능 · 트레이 우클릭 → 열기"),
+                );
+            }
+            0
+        }
         WM_TIMER => {
             InvalidateRect(hwnd, std::ptr::null(), 0);
             0
@@ -915,6 +1000,7 @@ pub fn run(demo: bool) -> anyhow::Result<()> {
 
         add_tray(hwnd);
         crate::log("window created, tray added");
+        spawn_update_check(hwnd);
 
         // 30s is only a safety net; the worker posts a repaint on every poll.
         SetTimer(hwnd, 1, 30_000, None);

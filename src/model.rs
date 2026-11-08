@@ -14,6 +14,9 @@ pub struct PlayerIdentity {
     pub account_level: i64,
     #[serde(rename = "Incognito", default)]
     pub incognito: bool,
+    /// Set when the player asked the client to hide their account level.
+    #[serde(rename = "HideAccountLevel", default)]
+    pub hide_account_level: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

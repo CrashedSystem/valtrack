@@ -1,3 +1,4 @@
+mod agent;
 mod assets;
 mod auth;
 mod icons;
@@ -7,6 +8,7 @@ mod overlay;
 mod paths;
 mod rank;
 mod riot;
+mod update;
 mod ws;
 
 use anyhow::{Context, Result};
@@ -50,6 +52,18 @@ enum Cmd {
     },
     /// Show account, region, client version and token state
     Whoami,
+    /// Run the overlay only while VALORANT is up (invisible supervisor)
+    Agent {
+        /// Stop a running agent instead of starting one
+        #[arg(long)]
+        stop: bool,
+    },
+    /// Start the agent with Windows (login autostart)
+    Autostart {
+        /// Remove the login entry instead of adding it
+        #[arg(long)]
+        remove: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -60,6 +74,11 @@ pub struct Row {
     pub is_me: bool,
     pub name: String,
     pub level: i64,
+    /// Streamer/incognito mode: the client hides this player's identity from
+    /// other players, so the name column carries a `[S]` marker.
+    pub incognito: bool,
+    /// The player asked the client to hide their account level.
+    pub hide_level: bool,
     pub rank: String,
     pub agent: String,
     /// Agent UUID, used for the icon.
@@ -116,10 +135,14 @@ fn main() {
 
     // Hide the console before anything else when started from the desktop icon
     // (no arguments = overlay) so there is no visible flash.
-    let first = std::env::args().nth(1);
-    let overlay_like = match first.as_deref() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let first = args.first().map(String::as_str);
+    let overlay_like = match first {
         None => true,
         Some("overlay") => true,
+        // The supervisor is invisible by design; `--stop` stays visible so the
+        // user can actually read the result.
+        Some("agent") => !args.iter().any(|a| a == "--stop"),
         _ => false,
     };
     if overlay_like {
@@ -148,6 +171,14 @@ fn run() -> Result<()> {
         Cmd::Watch { interval } => watch(cli.json, interval.max(2)),
         Cmd::Overlay { demo } => overlay::run(demo),
         Cmd::Whoami => whoami(cli.json),
+        Cmd::Agent { stop } => {
+            if stop {
+                agent::stop()
+            } else {
+                agent::run()
+            }
+        }
+        Cmd::Autostart { remove } => agent::autostart(remove),
     }
 }
 
@@ -531,11 +562,19 @@ fn lobby_from_pregame(m: &model::PregameMatch, my_puuid: &str) -> Lobby {
 }
 
 fn row_of(p: &model::GamePlayer) -> Row {
+    let incognito = p.identity.as_ref().map(|i| i.incognito).unwrap_or(false);
+    let hide_level = p
+        .identity
+        .as_ref()
+        .map(|i| i.hide_account_level)
+        .unwrap_or(false);
     Row {
         puuid: p.puuid().to_string(),
         is_me: false,
         name: "hidden".into(),
         level: p.identity.as_ref().map(|i| i.account_level).unwrap_or(0),
+        incognito,
+        hide_level,
         rank: rank::rank_label(p.competitive_tier, 0),
         agent: p.character_id.clone().unwrap_or_default(),
         agent_id: p.character_id.clone().unwrap_or_default(),
@@ -588,11 +627,23 @@ fn print_team(title: &str, rows: &[Row]) {
         } else {
             "-".to_string()
         };
+        // Streamer mode hides the name from other clients; level can be hidden
+        // independently of that. Both are shown as markers, not as real data.
+        let name = if r.incognito {
+            format!("{} [S]", truncate(&r.name, 18))
+        } else {
+            truncate(&r.name, 22)
+        };
+        let level = if r.hide_level {
+            "-".to_string()
+        } else {
+            r.level.to_string()
+        };
         println!(
             "  {:<3} {:<22} {:>4}  {:<19} {:<12} {:>5} {}",
             i + 1,
-            truncate(&r.name, 22),
-            r.level,
+            name,
+            level,
             truncate(&r.rank, 19),
             truncate(&r.agent, 12),
             wr,
@@ -606,7 +657,9 @@ fn to_json(l: &Lobby) -> String {
         serde_json::json!({
             "puuid": r.puuid,
             "name": r.name,
-            "level": r.level,
+            "level": if r.hide_level { 0 } else { r.level },
+            "level_hidden": r.hide_level,
+            "incognito": r.incognito,
             "rank": r.rank,
             "agent": r.agent,
             "party": r.party,
