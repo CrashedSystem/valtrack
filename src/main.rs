@@ -7,6 +7,7 @@ mod overlay;
 mod paths;
 mod rank;
 mod riot;
+mod ws;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

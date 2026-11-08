@@ -923,9 +923,14 @@ pub fn run(demo: bool) -> anyhow::Result<()> {
         if demo {
             *state().lock().unwrap() = Some(demo_view());
         } else {
+            // Presence events wake the worker immediately. The timer below is only
+            // a fallback (and the only trigger if the WebSocket cannot connect).
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            crate::ws::spawn(tx);
+
             std::thread::spawn(move || {
                 // Expensive lookups (names/ranks/parties) are cached per roster so a
-                // 5s poll does not hammer Riot with ~26 requests every tick.
+                // poll does not hammer Riot with ~26 requests every tick.
                 let mut cache: Option<Cache> = None;
                 loop {
                     let view = match connect() {
@@ -960,6 +965,7 @@ pub fn run(demo: bool) -> anyhow::Result<()> {
                         Err(_) => None,
                     };
 
+                    let has_view = view.is_some();
                     *state().lock().unwrap() = view;
 
                     let slot = *hwnd_slot().lock().unwrap();
@@ -967,7 +973,18 @@ pub fn run(demo: bool) -> anyhow::Result<()> {
                         PostMessageW(slot as HWND, WM_REFRESH, 0, 0);
                     }
 
-                    std::thread::sleep(Duration::from_secs(5));
+                    // In a match 5s keeps agent picks and score changes fresh; idle
+                    // 10s halves the token churn because presence events normally
+                    // wake us the moment a queue pops.
+                    let wait = if has_view {
+                        Duration::from_secs(5)
+                    } else {
+                        Duration::from_secs(10)
+                    };
+                    // Wake on the next presence event, or after `wait` if the
+                    // WebSocket is down / quiet. Drain duplicates queued meanwhile.
+                    let _ = rx.recv_timeout(wait);
+                    while rx.try_recv().is_ok() {}
                 }
             });
         }
