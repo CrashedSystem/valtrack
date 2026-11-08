@@ -1,0 +1,7 @@
+# Research artifacts (probes, captured API JSON, screenshots, registry backups)
+# are kept local only: they contain live tokens and other players' data.
+/re/
+/target/
+/dist/
+*.log
+*.pdb
