@@ -51,29 +51,36 @@ const MENU_TOGGLE: usize = 1;
 const MENU_QUIT: usize = 2;
 const MENU_UPDATE: usize = 3;
 
-const WIDTH: i32 = 540;
-const HEIGHT: i32 = 636;
-const ROW_H: i32 = 46;
+const WIDTH: i32 = 420;
+const HEIGHT: i32 = 560;
+const ROW_H: i32 = 40;
 /// Left edge of the content column (panel border + gutter).
-const PAD: i32 = 26;
+const PAD: i32 = 18;
 
 fn rgb(r: u32, g: u32, b: u32) -> COLORREF {
     r | (g << 8) | (b << 16)
 }
 
 const KEY: COLORREF = 0x00FF_00FF; // magenta -> punched out
-const BG: COLORREF = 0x0014_1113;
-const BORDER: COLORREF = 0x002D_2B33;
-const DIVIDER: COLORREF = 0x0026_242B;
-const WHITE: COLORREF = 0x00F4_F3F6;
-const DIM: COLORREF = 0x009C_9AA3;
-const MUTED: COLORREF = 0x006D_6B73;
+/// Panel surface. Deep navy-black, a touch warmer than pure black so it reads as
+/// a designed surface rather than a hole in the screen.
+const BG: COLORREF = 0x0014_1218;
+/// Elevated surface for team headers and the local row.
+const SURFACE: COLORREF = 0x0022_1F29;
+const BORDER: COLORREF = 0x0033_2E40;
+const DIVIDER: COLORREF = 0x0020_1D26;
+const WHITE: COLORREF = 0x00FA_F9FC;
+const DIM: COLORREF = 0x00B0_ACBB;
+const MUTED: COLORREF = 0x007A_7686;
 const ACCENT: COLORREF = 0x0055_46FF;
-/// Background band behind the local player's row. Subtle on purpose: it should
-/// read as "this one is you", not as a selection box.
-const ME_ROW: COLORREF = 0x002C_1E1A;
+/// Local player's row: a lifted surface plus an accent stripe, so it is obvious
+/// without tinting the text.
+const ME_ROW: COLORREF = 0x0026_222F;
+const ME_BAR: COLORREF = 0x0055_46FF;
+/// Ally tint: VALORANT teal.
 const ALLY: COLORREF = 0x0055_46FF;
-const ENEMY: COLORREF = 0x00FF_B8_7A;
+/// Enemy tint: warm amber, which reads as "them" without a harsh red.
+const ENEMY: COLORREF = 0x00FF_A8_5A;
 
 /// Party size -> rail colour. Premade groups are the single most useful thing
 /// on this panel, so each size gets its own hue and a bar down the row.
@@ -109,7 +116,7 @@ fn avg_rank(rows: &[Row]) -> String {
 /// window and clip the last rows.
 fn view_height(v: &View) -> i32 {
     let rows = |n: usize| (n.max(1) as i32) * ROW_H;
-    74 + 24 + rows(v.allies.len()) + 6 + 16 + 24 + rows(v.enemies.len()) + 40
+    62 + 20 + rows(v.allies.len()) + 4 + 14 + 20 + rows(v.enemies.len()) + 34
 }
 
 #[derive(Clone, Default)]
@@ -452,6 +459,53 @@ unsafe fn fill(hdc: HDC, rc: &RECT, color: COLORREF) {
     DeleteObject(brush);
 }
 
+/// Filled rounded rectangle. `radius` is clamped so a tiny box cannot invert.
+///
+/// The region is applied inside a saved DC state: selecting it as the DC's
+/// default region and then deleting it leaves the DC pointing at freed memory,
+/// which silently kills every later draw call.
+unsafe fn fill_round(hdc: HDC, rc: &RECT, radius: i32, color: COLORREF) {
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateRoundRectRgn, FillRgn, RestoreDC, SaveDC, SelectClipRgn,
+    };
+    let r = radius.max(0);
+    let rgn = CreateRoundRectRgn(
+        rc.left,
+        rc.top,
+        rc.right + 1,
+        rc.bottom + 1,
+        r * 2,
+        r * 2,
+    );
+    if rgn.is_null() {
+        fill(hdc, rc, color);
+        return;
+    }
+    let saved = SaveDC(hdc);
+    SelectClipRgn(hdc, rgn);
+    let brush = CreateSolidBrush(color);
+    FillRgn(hdc, rgn, brush);
+    DeleteObject(brush);
+    if saved != 0 {
+        RestoreDC(hdc, saved);
+    } else {
+        SelectClipRgn(hdc, std::ptr::null_mut());
+    }
+    DeleteObject(rgn);
+}
+
+/// Card with a 1 px outline, drawn as two nested rounded rects.
+unsafe fn card(hdc: HDC, rc: &RECT, radius: i32, body: COLORREF, edge: COLORREF) {
+    fill_round(hdc, rc, radius, edge);
+    let inner = RECT {
+        left: rc.left + 1,
+        top: rc.top + 1,
+        right: rc.right - 1,
+        bottom: rc.bottom - 1,
+    };
+    fill_round(hdc, &inner, (radius - 1).max(0), body);
+}
+
 /// Small always-on-top strip shown when the user asks for the overlay but no
 /// match is running, so a double-click visibly does something.
 unsafe fn paint_waiting(hwnd: HWND, hdc: HDC) {
@@ -540,41 +594,39 @@ unsafe fn paint(hwnd: HWND) {
     let (f_title, f_name, f_team, f_rank, f_small) = fonts();
     let h = view_height(&v);
 
-    // Panel
+    // Panel: rounded, 1 px edge. Radius is small so the colour-key corners stay
+    // tight and no magenta fringe survives on the outside.
     let panel = RECT {
-        left: 8,
-        top: 8,
-        right: WIDTH - 8,
-        bottom: h - 8,
+        left: 10,
+        top: 10,
+        right: WIDTH - 10,
+        bottom: h - 10,
     };
-    fill(hdc, &panel, BG);
-    let border = CreateSolidBrush(BORDER);
-    FrameRect(hdc, &panel, border);
-    DeleteObject(border);
+    card(hdc, &panel, 8, BG, BORDER);
 
     // Header: brand, map, then queue/state on one quiet line.
     let mut rc = RECT {
         left: PAD,
-        top: 14,
+        top: 10,
         right: WIDTH - PAD,
-        bottom: 38,
+        bottom: 32,
     };
     draw_text(hdc, f_title, "VALORANT", &mut rc, ACCENT, DT_LEFT);
 
     let mut rc2 = RECT {
         left: PAD,
-        top: 16,
+        top: 12,
         right: WIDTH - PAD,
-        bottom: 38,
+        bottom: 32,
     };
     let map_ko = crate::l10n::map_ko(&v.map).unwrap_or(v.map.as_str());
     draw_text(hdc, f_name, map_ko, &mut rc2, WHITE, DT_RIGHT);
 
     let mut rc3 = RECT {
         left: PAD,
-        top: 38,
+        top: 32,
         right: WIDTH - PAD,
-        bottom: 58,
+        bottom: 50,
     };
     let sub = format!("{}  ·  {}", mode_label_of(&v.mode), state_label_of(&v.state));
     draw_text(hdc, f_small, &sub, &mut rc3, MUTED, DT_LEFT);
@@ -583,31 +635,30 @@ unsafe fn paint(hwnd: HWND) {
     if crate::ACT_UNKNOWN.load(Ordering::Relaxed) {
         let mut warn = RECT {
             left: WIDTH / 2,
-            top: 38,
+            top: 32,
             right: WIDTH - PAD,
-            bottom: 58,
+            bottom: 50,
         };
         draw_text(
             hdc,
             f_small,
-            "랭크 미지원 · 업데이트 대기",
+            "랭크 미지원",
             &mut warn,
             rgb(0xF5, 0xA6, 0x23),
             DT_RIGHT,
         );
     }
 
-    divider(hdc, 64);
+    divider(hdc, 58);
 
     let y = team(
-        hdc, "내 팀", &v.allies, 74, f_team, f_name, f_rank, f_small, ALLY,
+        hdc, "내 팀", &v.allies, 62, f_team, f_name, f_rank, f_small, ALLY,
     );
-    divider(hdc, y + 6);
     team(
         hdc,
         "상대 팀",
         &v.enemies,
-        y + 16,
+        y + 10,
         f_team,
         f_name,
         f_rank,
@@ -617,9 +668,9 @@ unsafe fn paint(hwnd: HWND) {
 
     let mut hint = RECT {
         left: PAD,
-        top: h - 30,
+        top: h - 24,
         right: WIDTH - PAD,
-        bottom: h - 12,
+        bottom: h - 8,
     };
     draw_text(
         hdc,
@@ -632,9 +683,9 @@ unsafe fn paint(hwnd: HWND) {
 
     let mut brand = RECT {
         left: PAD,
-        top: h - 30,
+        top: h - 24,
         right: WIDTH - PAD,
-        bottom: h - 12,
+        bottom: h - 8,
     };
     draw_text(hdc, f_small, "valtrack", &mut brand, MUTED, DT_RIGHT);
 
@@ -655,17 +706,27 @@ unsafe fn team(
     f_small: HFONT,
     color: COLORREF,
 ) -> i32 {
-    // Team marker
-    let sq = RECT {
-        left: PAD,
-        top: y + 5,
-        right: PAD + 8,
-        bottom: y + 13,
+    // Team header: a tinted card with a colour bar on its left edge. Reads as a
+    // section title rather than another row of data.
+    let pill = RECT {
+        left: PAD - 6,
+        top: y - 4,
+        right: WIDTH - PAD + 6,
+        bottom: y + 20,
     };
-    fill(hdc, &sq, color);
+    card(hdc, &pill, 7, SURFACE, DIVIDER);
+
+    // Colour bar flush inside the card's left edge.
+    let rail = RECT {
+        left: PAD - 5,
+        top: y - 3,
+        right: PAD - 1,
+        bottom: y + 19,
+    };
+    fill_round(hdc, &rail, 2, color);
 
     let mut rc = RECT {
-        left: PAD + 14,
+        left: PAD + 6,
         top: y,
         right: WIDTH / 2,
         bottom: y + 20,
@@ -686,7 +747,7 @@ unsafe fn team(
     };
     draw_text(hdc, f_small, &summary, &mut sr, MUTED, DT_RIGHT);
 
-    let mut ry = y + 24;
+    let mut ry = y + 26;
 
     if rows.is_empty() {
         let mut er = RECT {
@@ -706,10 +767,20 @@ unsafe fn team(
         return ry + 32;
     }
 
-    for row in rows {
+    for (i, row) in rows.iter().enumerate() {
         draw_row(hdc, row, ry, f_name, f_rank, f_small);
         ry += ROW_H;
-    }
+        // Hairline between players: makes the list read as a table instead of
+        // one solid block of text.
+        if i + 1 < rows.len() {
+            let sep = RECT {
+                left: PAD + 34,
+                top: ry - 1,
+                right: WIDTH - PAD,
+                bottom: ry,
+            };
+            fill(hdc, &sep, DIVIDER);
+        }    }
     ry
 }
 
@@ -722,35 +793,43 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
     // "which one is me" at a glance in a ten-player lobby.
     if row.is_me {
         let band = RECT {
-            left: 10,
+            left: 4,
             top: y,
-            right: WIDTH - 10,
+            right: WIDTH - 4,
             bottom: y + ROW_H,
         };
         fill(hdc, &band, ME_ROW);
+        // A 2 px accent stripe marks the row without depending on the name colour.
+        let bar = RECT {
+            left: 4,
+            top: y,
+            right: 6,
+            bottom: y + ROW_H,
+        };
+        fill(hdc, &bar, ME_BAR);
     }
 
     // Party rail: the fastest way to spot a premade group.
     if let Some(c) = pcolor {
         let rail = RECT {
-            left: 13,
-            top: y + 6,
-            right: 16,
-            bottom: y + ROW_H - 6,
+            left: 7,
+            top: y + 5,
+            right: 10,
+            bottom: y + ROW_H - 5,
         };
         fill(hdc, &rail, c);
     }
 
     if let Some(icon) = crate::icons::agent_icon(&row.agent_id) {
-        crate::icons::draw(hdc, &icon, PAD, y + 8, 30);
+        crate::icons::draw(hdc, &icon, PAD, y + 6, 28);
     }
 
     // Name column: stops well before the rank block so long KR names ellipsize.
     let mut name_rc = RECT {
-        left: PAD + 38,
-        top: y + 4,
-        right: WIDTH - 176,
-        bottom: y + 26,
+        left: PAD + 34,
+        top: y + 1,
+        right: WIDTH - 118,
+        bottom: y + 21,
     };
     let name_color = if row.is_me { ACCENT } else { WHITE };
     // `[S]` = streamer/incognito mode: the client hides this identity from
@@ -781,10 +860,10 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
     }
     let sub = parts.join("  ·  ");
     let mut sub_rc = RECT {
-        left: PAD + 38,
-        top: y + 25,
-        right: WIDTH - 176,
-        bottom: y + 43,
+        left: PAD + 34,
+        top: y + 19,
+        right: WIDTH - 118,
+        bottom: y + 37,
     };
     draw_text(hdc, f_small, &sub, &mut sub_rc, DIM, DT_LEFT);
 
@@ -793,37 +872,37 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         let label = party_label(Some(n));
         let sw = text_width(hdc, f_small, &sub);
         let lw = text_width(hdc, f_small, &label);
-        let right_limit = WIDTH - 176 - lw;
-        let px = (PAD + 38 + sw + 10).min(right_limit).max(PAD + 38);
+        let right_limit = WIDTH - 118 - lw;
+        let px = (PAD + 34 + sw + 8).min(right_limit).max(PAD + 34);
         let mut pr = RECT {
             left: px,
-            top: y + 25,
+            top: y + 19,
             right: px + lw + 2,
-            bottom: y + 43,
+            bottom: y + 37,
         };
         draw_text(hdc, f_small, &label, &mut pr, pcolor.unwrap_or(DIM), DT_LEFT);
     }
 
     if let Some(icon) = crate::icons::rank_icon(row.tier) {
-        crate::icons::draw(hdc, &icon, WIDTH - 168, y + 12, 22);
+        crate::icons::draw(hdc, &icon, WIDTH - 114, y + 9, 20);
     }
 
     let tier_text = crate::rank::tier_name_ko(row.tier).to_string();
     let mut tr = RECT {
-        left: WIDTH - 138,
-        top: y + 6,
-        right: WIDTH - PAD,
-        bottom: y + 26,
+        left: WIDTH - 90,
+        top: y + 2,
+        right: WIDTH - 8,
+        bottom: y + 22,
     };
     draw_text(hdc, f_rank, &tier_text, &mut tr, WHITE, DT_RIGHT);
 
     if row.tier > 2 {
         let rr_text = format!("{} RR", row.rr);
         let mut rr_rc = RECT {
-            left: WIDTH - 138,
-            top: y + 24,
-            right: WIDTH - PAD,
-            bottom: y + 42,
+            left: WIDTH - 90,
+            top: y + 20,
+            right: WIDTH - 8,
+            bottom: y + 38,
         };
         draw_text(hdc, f_small, &rr_text, &mut rr_rc, DIM, DT_RIGHT);
     }
@@ -969,8 +1048,10 @@ pub fn run(demo: bool) -> anyhow::Result<()> {
         wc.lpszClassName = class_name.as_ptr();
         RegisterClassW(&wc);
 
-        let screen_w = GetSystemMetrics(SM_CXSCREEN);
-        let x = (screen_w - WIDTH - 24).max(0);
+        let _screen_w = GetSystemMetrics(SM_CXSCREEN);
+        // Left edge, under the minimap: the kill feed owns the top-right corner.
+        let x = 20;
+        let y = 190;
 
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW,
@@ -978,7 +1059,7 @@ pub fn run(demo: bool) -> anyhow::Result<()> {
             wide("valtrack overlay").as_ptr(),
             WS_POPUP,
             x,
-            24,
+            y,
             WIDTH,
             HEIGHT,
             std::ptr::null_mut(),
@@ -992,7 +1073,20 @@ pub fn run(demo: bool) -> anyhow::Result<()> {
         }
 
         SetLayeredWindowAttributes(hwnd, KEY, 0, LWA_COLORKEY);
+
+        // WS_POPUP ignored the create-time x/y on this build, so place it once.
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            x,
+            y,
+            WIDTH,
+            HEIGHT,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+
         *hwnd_slot().lock().unwrap() = hwnd as isize;
+        crate::log(&format!("overlay placed at ({x},{y}) {WIDTH}x{HEIGHT}"));
 
         // Alt+T toggles the overlay; Alt+Q quits. The game keeps its own keys.
         RegisterHotKey(hwnd, 1, MOD_ALT, VK_T as u32);
