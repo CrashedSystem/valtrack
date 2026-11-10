@@ -189,7 +189,11 @@ fn demo_view() -> View {
         rr_earned: earned,
         streak: if earned > 0 { 3 } else if earned < 0 { -2 } else { 0 },
         peak: if earned > 0 { Some("다이아몬드 2".to_string()) } else { None },
-        derank_games: if earned < 0 { 0 } else { 2 },
+        derank_games: match earned {
+            -12 => 0,
+            -20 => 2,
+            _ => 0,
+        },
         at_derank_tier: earned < 0,
         penalized: false,
         party,
@@ -209,12 +213,12 @@ fn demo_view() -> View {
         allies: vec![
             row("빨리자라#4141", "Jett", JETT, 18, 59, 87, Some(3), 10, 23, 21),
             row("주인님구해요#2222", "Astra", ASTRA, 15, 49, 96, Some(3), 14, 20, 18),
-            row("공주등장#바보멍청이", "Chamber", CHAMBER, 9, 5, 12, None, 3, 9, -12),
+            row("공주등장#바보멍청이", "Chamber", CHAMBER, 9, 0, 12, None, 3, 9, -12),
             row("그럼에도 불구하고#사랑해야지", "Omen", OMEN, 21, 56, 41, Some(2), 31, 55, 24),
             row("hidden", "Sage", SAGE, 14, 63, 177, Some(2), 9, 18, 19),
         ],
         enemies: (1..=5)
-            .map(|i| row("hidden", "Raze", RAZE, 16, 31, i * 20, Some(5), i * 3, 20, -20))
+            .map(|i| row("hidden", "Raze", RAZE, 16, if i <= 2 { 0 } else { 31 }, i * 20, Some(5), i * 3, 20, -20))
             .collect(),
     }
 }
@@ -1084,12 +1088,15 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
     }
     // Demotion risk and penalties outrank the peak label: both change how you
     // read the player, and the peak is trivia once you know either.
-    let risky = row.at_derank_tier || row.penalized;
-    if row.at_derank_tier {
+    // A player is only really in a demotion match at the bottom division of a
+    // tier with 0 RR; anywhere above 0 they still have points to lose first.
+    let derank_match = row.at_derank_tier && row.rr == 0 && row.tier > 2;
+    let risky = derank_match || row.penalized;
+    if derank_match {
         third.push(if row.derank_games > 0 {
-            format!("강등전 (보호 {}판)", row.derank_games)
+            format!("강등전 (보호 {}개 남음)", row.derank_games)
         } else {
-            "강등전 임박".to_string()
+            "강등전".to_string()
         });
     }
     if row.penalized {
