@@ -195,7 +195,7 @@ fn demo_view() -> View {
             _ => 0,
         },
         at_derank_tier: earned < 0,
-        penalized: false,
+        penalized: earned == -20,
         party,
         wins: w,
         games: g,
@@ -1086,21 +1086,39 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
             row.rr_earned
         ));
     }
-    // Demotion risk and penalties outrank the peak label: both change how you
-    // read the player, and the peak is trivia once you know either.
-    // A player is only really in a demotion match at the bottom division of a
-    // tier with 0 RR; anywhere above 0 they still have points to lose first.
+    // Third line, in priority order: the fit loop below drops from the tail, so
+    // whatever matters most has to come first. Demotion and penalties outrank
+    // the streak; the peak label is dropped first because it is trivia.
+    let mut third = Vec::new();
     let derank_match = row.at_derank_tier && row.rr == 0 && row.tier > 2;
     let risky = derank_match || row.penalized;
     if derank_match {
+        // Compact on purpose: this line can carry a streak, an RR delta, the
+        // demotion flag and a penalty at once, and 392 px will not hold the
+        // long form of all four.
         third.push(if row.derank_games > 0 {
-            format!("강등전 (보호 {}개 남음)", row.derank_games)
+            format!("강등전 보호{}", row.derank_games)
         } else {
             "강등전".to_string()
         });
     }
     if row.penalized {
         third.push("제재 이력".to_string());
+    }
+    if row.streak != 0 {
+        let n = row.streak.unsigned_abs();
+        third.push(if row.streak > 0 {
+            format!("{n}연승 중")
+        } else {
+            format!("{n}연패 중")
+        });
+    }
+    if row.tier > 2 && row.rr_earned != 0 {
+        third.push(format!(
+            "최근 {}{} RR",
+            if row.rr_earned > 0 { "+" } else { "" },
+            row.rr_earned
+        ));
     }
     if !risky {
         if let Some(peak) = &row.peak {
@@ -1120,7 +1138,14 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         } else {
             MUTED
         };
-        let text = third.join("  ·  ");
+        // Fit by dropping from the tail rather than letting GDI clip mid-word.
+        // The items are already in priority order.
+        let avail = right - 92 - name_left;
+        let mut text = third.join("  ·  ");
+        while third.len() > 1 && text_width(hdc, f_small, &text) > avail {
+            third.pop();
+            text = third.join("  ·  ");
+        }
         let mut tr = RECT {
             left: name_left,
             top: y + 32,
