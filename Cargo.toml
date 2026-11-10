@@ -5,6 +5,16 @@ edition = "2021"
 description = "Minimal Valorant live-match tracker without Overwolf"
 license = "GPL-3.0-only"
 
+[[bin]]
+name = "valtrack"
+path = "src/main.rs"
+
+# The installer is a separate program: the app stays a single small exe with no
+# UI toolkit, and setup is only needed once.
+[[bin]]
+name = "valtrack-setup"
+path = "src/bin/setup.rs"
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"

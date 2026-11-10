@@ -22,5 +22,8 @@ cd "$DST"
 cargo build --release --target x86_64-pc-windows-gnu
 
 mkdir -p "$SRC/dist"
-cp target/x86_64-pc-windows-gnu/release/valtrack.exe "$SRC/dist/valtrack.exe"
-ls -lh "$SRC/dist/valtrack.exe"
+OUT=target/x86_64-pc-windows-gnu/release
+cp "$OUT/valtrack.exe" "$SRC/dist/valtrack.exe"
+# The installer ships beside the app and copies that same exe into place.
+cp "$OUT/valtrack-setup.exe" "$SRC/dist/valtrack-setup.exe"
+ls -lh "$SRC/dist/valtrack.exe" "$SRC/dist/valtrack-setup.exe"

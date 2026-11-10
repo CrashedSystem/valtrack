@@ -3,6 +3,7 @@ mod assets;
 mod auth;
 mod fonts;
 mod icons;
+mod install;
 mod l10n;
 mod model;
 mod overlay;
@@ -65,6 +66,12 @@ enum Cmd {
         #[arg(long)]
         remove: bool,
     },
+    /// Copy this build to %LOCALAPPDATA%, start it at login and launch the agent
+    Install,
+    /// Remove the login entry, stop the agent and delete the installed copy
+    Uninstall,
+    /// Show what is installed, whether it runs at login, and whether it is live
+    Status,
 }
 
 #[derive(Clone)]
@@ -180,6 +187,9 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Autostart { remove } => agent::autostart(remove),
+        Cmd::Install => agent::install(),
+        Cmd::Uninstall => agent::uninstall(),
+        Cmd::Status => agent::status(),
     }
 }
 

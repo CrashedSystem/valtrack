@@ -9,6 +9,9 @@
 //!
 //! It deliberately does *not* touch the Riot API. Only the child reads the
 //! lockfile, so an idle agent costs one process-table snapshot per 2 s.
+//!
+//! Install/autostart plumbing lives in `install.rs`, shared with the GUI
+//! installer; this module only owns the loop and the CLI wrappers.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -16,75 +19,24 @@ use std::time::Duration;
 
 use std::os::windows::process::CommandExt;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
-use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
-};
-use windows_sys::Win32::System::Threading::{
-    GetExitCodeProcess, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_TERMINATE,
-};
+use crate::install;
 
-const GAME_EXE: &str = "VALORANT.exe";
-const POLL: Duration = Duration::from_secs(2);const AUTOSTART_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-const AUTOSTART_NAME: &str = "valtrack";
-
-fn pid_path() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(|base| PathBuf::from(base).join("valtrack").join("agent.pid"))
-}
-
-unsafe fn process_running(name: &str) -> bool {
-    let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if snapshot == INVALID_HANDLE_VALUE {
-        return false;
-    }
-
-    let mut entry: PROCESSENTRY32W = std::mem::zeroed();
-    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-    let mut found = false;
-
-    if Process32FirstW(snapshot, &mut entry) != 0 {
-        loop {
-            let end = entry
-                .szExeFile
-                .iter()
-                .position(|c| *c == 0)
-                .unwrap_or(entry.szExeFile.len());
-            let exe = String::from_utf16_lossy(&entry.szExeFile[..end]);
-            if exe.eq_ignore_ascii_case(name) {
-                found = true;
-                break;
-            }
-            if Process32NextW(snapshot, &mut entry) == 0 {
-                break;
-            }
-        }
-    }
-
-    CloseHandle(snapshot);
-    found
-}
+const POLL: Duration = Duration::from_secs(2);
 
 /// Supervisor loop. Blocks forever; stop it with `valtrack.exe agent --stop`.
 pub fn run() -> Result<()> {
     // One agent per session: a second autostart entry (or a manual launch) must
     // not produce two overlays fighting over the same window.
-    let already = pid_path()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|text| text.trim().parse::<u32>().ok())
-        .map(|pid| unsafe { process_alive(pid) })
-        .unwrap_or(false);
-    if already {
+    if install::agent_alive() {
         crate::log("agent: already running, exiting");
         return Ok(());
     }
 
-    if let Some(path) = pid_path() {
+    if let Some(path) = install::pid_path() {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -92,13 +44,13 @@ pub fn run() -> Result<()> {
     }
     let exe = std::env::current_exe().context("current_exe")?;
     let mut child: Option<Child> = None;
-    let mut seen_game = false;
     // Test hook: lets the supervisor be exercised without launching VALORANT.
-    let game_exe = std::env::var("VALTRACK_GAME_EXE").unwrap_or_else(|_| GAME_EXE.to_string());
+    let game_exe =
+        std::env::var("VALTRACK_GAME_EXE").unwrap_or_else(|_| install::GAME_EXE.to_string());
     crate::log(&format!("agent: watching for {game_exe}"));
 
     loop {
-        let running = unsafe { process_running(&game_exe) };
+        let running = unsafe { install::process_running(&game_exe) };
 
         // Reap a child that died on its own (user pressed Alt+Q, or it crashed).
         if let Some(c) = child.as_mut() {
@@ -109,9 +61,6 @@ pub fn run() -> Result<()> {
         }
 
         if running && child.is_none() {
-            if !seen_game {
-                seen_game = true;
-            }
             let spawned = Command::new(&exe)
                 .arg("overlay")
                 // hide_console() freed our console, so the inherited stdio
@@ -143,82 +92,79 @@ pub fn run() -> Result<()> {
     }
 }
 
-unsafe fn process_alive(pid: u32) -> bool {
-    // A handle alone proves nothing: Windows keeps terminated pids around and
-    // the id can be recycled, so query the exit code instead.
-    let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-    if handle.is_null() {
-        return false;
-    }
-    let mut code: u32 = 0;
-    let ok = GetExitCodeProcess(handle, &mut code) != 0;
-    CloseHandle(handle);
-    // STILL_ACTIVE (259) is what a live process reports.
-    ok && code == 259
-}
-
 /// `valtrack.exe agent --stop`
 pub fn stop() -> Result<()> {
-    let Some(path) = pid_path() else {
-        bail!("LOCALAPPDATA is not set");
-    };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        bail!("no agent pid file at {}", path.display());
-    };
-    let pid: u32 = text.trim().parse().context("bad pid file")?;
-
-    unsafe {
-        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if handle.is_null() {
-            let _ = std::fs::remove_file(&path);
-            bail!("agent pid {pid} is not running (stale pid file removed)");
-        }
-        let ok = TerminateProcess(handle, 0) != 0;
-        CloseHandle(handle);
-        let _ = std::fs::remove_file(&path);
-        if !ok {
-            bail!("TerminateProcess failed for pid {pid}");
-        }
-    }
+    let pid = install::stop_agent()?;
     println!("agent stopped (pid {pid})");
+    Ok(())
+}
+
+/// `valtrack.exe install` - the same work the GUI installer performs.
+pub fn install() -> Result<()> {
+    let me = std::env::current_exe().context("current_exe")?;
+    let target = install::install_from(&me)?;
+    println!("installed  {}", target.display());
+    println!(
+        "autostart  {}",
+        install::autostart_value()?.unwrap_or_default()
+    );
+    match install::agent_pid() {
+        Some(pid) => println!("agent      running (pid {pid})"),
+        None => println!("agent      starting"),
+    }
+    println!();
+    println!("VALORANT 가 실행되면 오버레이가 자동으로 뜹니다.");
+    Ok(())
+}
+
+/// `valtrack.exe uninstall`
+pub fn uninstall() -> Result<()> {
+    let target = PathBuf::from(install::installed_exe()?);
+    install::uninstall()?;
+    println!("removed    {}", target.display());
+    Ok(())
+}
+
+/// `valtrack.exe status`
+pub fn status() -> Result<()> {
+    let st = install::status()?;
+    println!(
+        "install path   {}",
+        install::installed_exe()?.display()
+    );
+    println!("installed      {}", yes_no(st.installed));
+    println!("login entry    {}", yes_no(st.autostart.is_some()));
+    if let Some(value) = st.autostart.as_deref() {
+        println!("login target   {value}");
+    }
+    println!("agent          {}", if st.agent_running { "running" } else { "stopped" });
+    println!(
+        "VALORANT       {}",
+        if st.game_running { "running" } else { "not running" }
+    );
     Ok(())
 }
 
 /// `valtrack.exe autostart` / `--remove`
 pub fn autostart(remove: bool) -> Result<()> {
     if remove {
-        let status = Command::new("reg")
-            .args(["delete", AUTOSTART_KEY, "/v", AUTOSTART_NAME, "/f"])
-            .status()
-            .context("run reg delete")?;
-        // A missing value is already the desired state.
-        if status.success() {
+        if install::remove_autostart()? {
             println!("autostart removed");
         } else {
             println!("autostart was not registered");
         }
         return Ok(());
     }
-
     let exe = std::env::current_exe().context("current_exe")?;
-    let value = format!("\"{}\" agent", exe.display());
-    let status = Command::new("reg")
-        .args([
-            "add",
-            AUTOSTART_KEY,
-            "/v",
-            AUTOSTART_NAME,
-            "/t",
-            "REG_SZ",
-            "/d",
-            &value,
-            "/f",
-        ])
-        .status()
-        .context("run reg add")?;
-    if !status.success() {
-        bail!("reg add failed ({status})");
-    }
+    let value = install::register_autostart(&exe)?;
     println!("autostart installed: {value}");
     Ok(())
+}
+
+fn yes_no(v: bool) -> &'static str {
+    if v {
+        "yes"
+    } else {
+        "no"
+    }
 }
