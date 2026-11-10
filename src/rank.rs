@@ -81,24 +81,49 @@ pub fn party_label(size: Option<u8>) -> String {
     }
 }
 
-/// Mode ids arrive as queue ids (`competitive`) or game-mode class names
-/// (`QuickBombGameMode`). Both are shown in Korean.
+/// Mode ids arrive in three shapes: a queue id (`competitive`), a game-mode
+/// class (`QuickBombGameMode`), or a class with a variation suffix
+/// (`Swiftplay_EoRCredits_GameMode`, `RangeV2`). All three resolve to Korean.
+///
+/// The variation suffixes are real - Swiftplay reports
+/// `Swiftplay_EoRCredits_GameMode` while the end-of-round credits play, and the
+/// range reports `RangeV2` - so an exact-match table left raw English on screen.
 pub fn mode_label(mode: &str) -> String {
-    let korean = match mode {
-        "competitive" => "경쟁전",
-        "unrated" => "일반전",
-        "swiftplay" | "QuickBomb" | "QuickBombGameMode" => "신속 플레이",
-        "spikerush" => "스파이크 러시",
-        "deathmatch" => "데스매치",
-        "teamdeathmatch" | "hurm" | "HURM" => "팀 데스매치",
-        "premier" => "프리미어",
-        "Bomb" | "BombGameMode" => "일반/경쟁",
-        "GunGame" => "총의 게임",
-        "OneForAll" => "모두의 하나",
-        "Skirmish" => "난투",
-        "SnowballFight" => "눈싸움",
-        "" => "-",
-        other => return other.to_string(),
+    let lower = mode.to_ascii_lowercase();
+
+    let korean = if lower.contains("swiftplay") || lower.contains("quickbomb") {
+        "신속 플레이"
+    } else if lower.contains("spikerush") {
+        "스파이크 러시"
+    } else if lower.contains("teamdeathmatch") || lower.contains("hurm") {
+        "팀 데스매치"
+    } else if lower.contains("deathmatch") {
+        "데스매치"
+    } else if lower.contains("shootingrange") || lower == "rangev2" {
+        "사격장"
+    } else if lower.contains("skirmish") {
+        "난투"
+    } else if lower.contains("gungame") {
+        "총의 게임"
+    } else if lower.contains("oneforall") {
+        "모두의 하나"
+    } else if lower.contains("snowball") {
+        "눈싸움"
+    } else if lower.contains("gauntlet") || lower.contains("abilitydraft") {
+        "건틀릿"
+    } else if lower.contains("premier") {
+        "프리미어"
+    } else if lower.contains("ascen") || lower.contains("eorc") {
+        // End-of-round credits wrappers belong to the mode they wrap.
+        ""
+    } else {
+        match mode {
+            "competitive" => "경쟁전",
+            "unrated" => "일반전",
+            "bomb" | "bombgamemode" => "일반/경쟁",
+            "" | "-" => "-",
+            other => return other.to_string(),
+        }
     };
     korean.to_string()
 }
@@ -150,4 +175,50 @@ pub fn map_name(map_id: &str) -> String {
 pub fn mode_name(mode_id: &str) -> String {
     let tail = mode_id.rsplit('/').next().unwrap_or("Unknown");
     tail.split('.').next().unwrap_or("Unknown").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every one of these was seen on screen as raw English before the label
+    /// table learned to match by prefix.
+    #[test]
+    fn mode_labels_cover_observed_payloads() {
+        assert_eq!(mode_label("competitive"), "경쟁전");
+        assert_eq!(mode_label("Swiftplay_EoRCredits_GameMode"), "신속 플레이");
+        assert_eq!(mode_label("SkirmishGameMode"), "난투");
+        assert_eq!(mode_label("ShootingRangeGameMode"), "사격장");
+        assert_eq!(mode_label("RangeV2"), "사격장");
+        assert_eq!(mode_label("TeamDeathmatchGameMode"), "팀 데스매치");
+        assert_eq!(mode_label("HURM_Alley"), "팀 데스매치");
+        assert_eq!(mode_label("SpikeRushGameMode"), "스파이크 러시");
+        assert_eq!(mode_label(""), "-");
+    }
+
+    #[test]
+    fn every_tier_has_a_name() {
+        for tier in [0i64, 3, 9, 12, 15, 18, 21, 24, 27] {
+            let name = tier_name_ko(tier);
+            assert!(!name.is_empty(), "tier {tier} has no name");
+            assert_ne!(name, "알 수 없음", "tier {tier} fell through the table");
+        }
+    }
+
+    #[test]
+    fn peak_tier_picks_the_highest_earned_band() {
+        let mut counts = std::collections::HashMap::new();
+        counts.insert("DIAMOND".to_string(), 5);
+        counts.insert("PLATINUM".to_string(), 2);
+        // Lowest band must not win just because it is in the map.
+        assert_eq!(peak_tier_ko(&counts).map(|(_, n)| n), Some("다이아몬드 1"));
+    }
+
+    #[test]
+    fn party_label_covers_every_size() {
+        assert_eq!(party_label(Some(5)), "5인큐");
+        assert_eq!(party_label(Some(2)), "듀오");
+        assert_eq!(party_label(Some(1)), "솔로");
+        assert_eq!(party_label(None), "");
+    }
 }

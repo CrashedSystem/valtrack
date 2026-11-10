@@ -36,10 +36,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, FindWindowW, GetClientRect, GetCursorPos, GetMessageW, GetSystemMetrics,
     LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer,
     SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage, UpdateLayeredWindow, CS_HREDRAW,
-    CS_VREDRAW, HMENU, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA,
-    WM_APP, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CS_VREDRAW, HMENU, HWND_TOPMOST, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA, WM_APP, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY,
+    WM_LBUTTONDBLCLK, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 const WM_REFRESH: u32 = WM_APP + 1;
@@ -824,14 +825,6 @@ impl Surface {
         })
     }
 
-    /// Clears the whole surface to transparent black, ready for a new frame.
-    unsafe fn clear(&self) {
-        let all = std::slice::from_raw_parts_mut(self.bits, (self.w * self.h) as usize);
-        for p in all.iter_mut() {
-            *p = 0;
-        }
-    }
-
     unsafe fn destroy_now(&self) {
         DeleteObject(self.bmp as _);
         DeleteObject(self.dc as _);
@@ -921,8 +914,9 @@ unsafe fn paint(hwnd: HWND) {
     let Some(surf) = Surface::get(w, h) else {
         return;
     };
-    // Reuse the bitmap, but every frame starts from transparent.
-    surf.clear();
+    // No clear: the panel fills the whole window and mask_round() rewrites every
+    // pixel's alpha and premultiplied RGB, so a transparent reset would be
+    // overwritten immediately.
 
     let view = state().lock().unwrap().clone();
     let panel = match view {
@@ -1503,9 +1497,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             // window: paint directly instead of waiting for WM_PAINT.
             if has && VISIBLE.load(Ordering::Relaxed) {
                 ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                // The game takes focus on every round start and on alt-tab; a
+                // topmost window can be pushed below it. Re-assert the position
+                // in the z-order on every refresh.
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
                 paint(hwnd);
             } else if WAITING.load(Ordering::Relaxed) {
                 ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
                 paint(hwnd);
             } else {
                 ShowWindow(hwnd, SW_HIDE);

@@ -40,7 +40,7 @@ const ID_CLOSE: usize = 1003;
 const WM_APP_STATUS: u32 = 0x8000 + 2;
 
 const W: i32 = 460;
-const H: i32 = 320;
+const H: i32 = 348;
 const PAD: i32 = 28;
 
 const INK: u32 = 0x0020_1B1D;
@@ -115,13 +115,23 @@ unsafe fn build_ui(hwnd: HWND) {
         62,
         20,
     );
-    label("설치 위치", f_small, 104, 16);
+    label("설치 위치", f_small, 100, 16);
     let dir = install::install_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "LOCALAPPDATA 없음".to_string());
-    label(&dir, f_small, 122, 16);
+    label(&dir, f_small, 118, 16);
 
-    let status = label("확인 중…", f_small, 168, 60);
+    // The one setup requirement that is not obvious and cannot be detected from
+    // here: an exclusive-fullscreen game owns the display, so no overlay can be
+    // composited over it.
+    label(
+        "VALORANT 디스플레이 모드는 '창 전체화면'이어야 오버레이가 보입니다.",
+        f_small,
+        146,
+        18,
+    );
+
+    let status = label("확인 중…", f_small, 178, 56);
     *STATUS_HWND.lock().unwrap() = Some(status as isize);
 
     let by = H - 64;

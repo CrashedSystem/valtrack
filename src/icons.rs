@@ -137,9 +137,26 @@ impl Drop for Icon {
 unsafe impl Send for Icon {}
 unsafe impl Sync for Icon {}
 
-static CACHE: OnceLock<Mutex<HashMap<String, Option<Arc<Icon>>>>> = OnceLock::new();
+/// Cache key: kind (0 = agent, 1 = rank), asset index, rendered size. Integers
+/// so a repaint does not allocate a String per lookup - the previous
+/// `format!("agent:{id}:{size}")` ran 20 times a frame.
+type Key = (u8, u32, i32);
 
-fn cached(key: String, bytes: &[u8], size: i32) -> Option<Arc<Icon>> {
+static CACHE: OnceLock<Mutex<HashMap<Key, Option<Arc<Icon>>>>> = OnceLock::new();
+/// `agent_id -> index in assets::AGENTS`, built once.
+static AGENT_INDEX: OnceLock<HashMap<String, u32>> = OnceLock::new();
+
+fn agent_index() -> &'static HashMap<String, u32> {
+    AGENT_INDEX.get_or_init(|| {
+        assets::AGENTS
+            .iter()
+            .enumerate()
+            .map(|(i, (uuid, _))| (uuid.to_string(), i as u32))
+            .collect()
+    })
+}
+
+fn cached(key: Key, bytes: &[u8], size: i32) -> Option<Arc<Icon>> {
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = cache.lock().unwrap();
     if let Some(hit) = guard.get(&key) {
@@ -154,23 +171,30 @@ pub fn agent_icon(agent_id: &str, size: i32) -> Option<Arc<Icon>> {
     if agent_id.is_empty() {
         return None;
     }
-    let id = agent_id.to_lowercase();
-    let bytes = assets::AGENTS
-        .iter()
-        .find(|(uuid, _)| *uuid == id)
-        .map(|(_, b)| *b)?;
-    cached(format!("agent:{id}:{size}"), bytes, size)
+    // Asset UUIDs are stored lowercase. The agent id from the API usually is
+    // too, so try the hash lookup first and fall back to a scan for the rare
+    // mixed-case payload rather than allocating a lowercased copy per frame.
+    let table = agent_index();
+    let index = table.get(agent_id).copied().or_else(|| {
+        table
+            .iter()
+            .find(|(uuid, _)| uuid.eq_ignore_ascii_case(agent_id))
+            .map(|(_, i)| *i)
+    })?;
+    let bytes = assets::AGENTS[index as usize].1;
+    cached((0, index, size), bytes, size)
 }
 
 pub fn rank_icon(tier: i64, size: i32) -> Option<Arc<Icon>> {
     if tier <= 0 {
         return None;
     }
-    let bytes = assets::RANKS
+    let (index, bytes) = assets::RANKS
         .iter()
-        .find(|(t, _)| *t == tier)
-        .map(|(_, b)| *b)?;
-    cached(format!("rank:{tier}:{size}"), bytes, size)
+        .enumerate()
+        .find(|(_, (t, _))| *t == tier)
+        .map(|(i, (_, b))| (i as u32, *b))?;
+    cached((1, index, size), bytes, size)
 }
 
 /// Blits at the icon's own pixel size. `size` is accepted so callers keep
