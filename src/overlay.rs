@@ -1024,11 +1024,12 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         parts.push(row.agent.clone());
     }
     if row.games > 0 {
-        // games is the total count, so 10/23 would read as a win/loss record.
+        // games is the total, so lead with it: "23전 10승 43%" reads as
+        // total / wins / rate, and stays short enough for a 392 px row.
         parts.push(format!(
-            "{}승 {}판 {}%",
-            row.wins,
+            "{}전 {}승 {}%",
             row.games,
+            row.wins,
             (row.wins * 100 / row.games).clamp(0, 100)
         ));
     } else {
