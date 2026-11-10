@@ -257,10 +257,11 @@ fn diag_lobby(riot: &riot::Riot) {
     println!();
     println!("=== lobby penalty / demotion ===");
     println!(
-        "{:<24} {:>5} {:>4} {:>5} {:>7} {:>6}",
-        "player", "tier", "rr", "derank", "protect", "afk"
+        "{:<24} {:>5} {:>4} {:>5} {:>7} {:>6} {:>5} {:>6}",
+        "player", "tier", "rr", "derank", "protect", "afk", "level", "hidden"
     );
-    for id in &ids {
+    for row in lobby.allies.iter().chain(lobby.enemies.iter()) {
+        let id = &row.puuid;
         let label = names
             .get(id)
             .map(|n| {
@@ -271,24 +272,27 @@ fn diag_lobby(riot: &riot::Riot) {
                 }
             })
             .unwrap_or_else(|| id.chars().take(8).collect());
-        match mmrs.get(id) {
-            Some(m) => {
-                // Same rule the overlay uses: a demotion match needs 0 RR at the
-                // bottom division. Printing the raw flag made the table claim
-                // "derank" for a player still sitting on 74 RR.
-                let demotion = m.at_derank_tier && m.latest.rr == 0;
-                println!(
-                    "{:<24} {:>5} {:>4} {:>5} {:>7} {:>6}",
-                    label,
-                    m.latest.tier,
-                    m.latest.rr,
-                    if demotion { "yes" } else { "-" },
-                    m.derank_games_left,
-                    m.latest.afk_penalty
-                )
-            }
-            None => println!("{:<24} (mmr unavailable)", label),
-        }
+        let (tier, rr, demotion, protect, afk) = match mmrs.get(id) {
+            Some(m) => (
+                m.latest.tier,
+                m.latest.rr,
+                m.at_derank_tier && m.latest.rr == 0,
+                m.derank_games_left,
+                m.latest.afk_penalty,
+            ),
+            None => (0, 0, false, 0, 0),
+        };
+        println!(
+            "{:<24} {:>5} {:>4} {:>5} {:>7} {:>6} {:>5} {:>6}",
+            label,
+            tier,
+            rr,
+            if demotion { "yes" } else { "-" },
+            protect,
+            afk,
+            row.level,
+            if row.hide_level { "hide" } else { "-" }
+        );
     }
 }
 
@@ -432,6 +436,7 @@ pub fn fetch_lobby(riot: &riot::Riot) -> Result<Option<Lobby>> {
 
 /// Expensive path: names, ranks, agents, party grouping.
 pub fn enrich_lobby(riot: &riot::Riot, lobby: &mut Lobby) {
+    let started = std::time::Instant::now();
     let mut puuids: Vec<String> = lobby.allies.iter().map(|r| r.puuid.clone()).collect();
     puuids.extend(lobby.enemies.iter().map(|r| r.puuid.clone()));
 
@@ -606,6 +611,11 @@ pub fn enrich_lobby(riot: &riot::Riot, lobby: &mut Lobby) {
     for row in lobby.allies.iter_mut().chain(lobby.enemies.iter_mut()) {
         row.streak = streaks.get(&row.puuid).copied().unwrap_or(0);
     }
+    crate::log(&format!(
+        "enrich: {} players in {} ms",
+        lobby.allies.len() + lobby.enemies.len(),
+        started.elapsed().as_millis()
+    ));
 }
 
 /// How far back to look for a streak, and when to stop counting.

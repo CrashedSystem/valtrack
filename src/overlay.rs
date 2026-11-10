@@ -8,7 +8,7 @@ use crate::rank::{
 };
 use crate::{connect, Lobby, Row};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use windows_sys::Win32::Foundation::{
     COLORREF, ERROR_ALREADY_EXISTS, GetLastError, SetLastError, HWND, LPARAM, POINT, LRESULT, RECT,
@@ -138,7 +138,7 @@ struct View {
     enemies: Vec<Row>,
 }
 
-static STATE: OnceLock<Mutex<Option<View>>> = OnceLock::new();
+static STATE: OnceLock<Mutex<Option<Arc<View>>>> = OnceLock::new();
 static HWND_SLOT: OnceLock<Mutex<isize>> = OnceLock::new();
 static FONTS: OnceLock<(usize, usize, usize, usize, usize)> = OnceLock::new();
 static VISIBLE: AtomicBool = AtomicBool::new(false);
@@ -168,7 +168,7 @@ fn roster_key(lobby: &Lobby) -> String {
     ids.join(",")
 }
 
-fn state() -> &'static Mutex<Option<View>> {
+fn state() -> &'static Mutex<Option<Arc<View>>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
@@ -189,6 +189,8 @@ fn demo_view() -> View {
         name: n.to_string(),
         level: lv,
         incognito: n == "hidden",
+        // The client hides a level only when the player asked for it; `hidden`
+        // in the demo stands for that case, so the rest keep their level.
         hide_level: n == "hidden",
         rank: String::new(),
         agent: agent.to_string(),
@@ -197,7 +199,13 @@ fn demo_view() -> View {
         rr,
         rr_earned: earned,
         streak: if earned > 0 { 3 } else if earned < 0 { -2 } else { 0 },
-        peak: if earned > 0 { Some("다이아몬드 2".to_string()) } else { None },
+        // Peak is independent of the last match's RR: it is lifetime history, so
+        // it is derived from the tier the demo row sits at, not from `earned`.
+        peak: if tier >= 12 {
+            Some(crate::rank::tier_name_ko(tier + 2).to_string())
+        } else {
+            None
+        },
         derank_games: match earned {
             -12 => 0,
             -20 => 2,
@@ -226,9 +234,13 @@ fn demo_view() -> View {
             row("그럼에도 불구하고#사랑해야지", "Omen", OMEN, 21, 56, 41, Some(2), 31, 55, 24),
             row("hidden", "Sage", SAGE, 14, 63, 177, Some(2), 9, 18, 19),
         ],
-        enemies: (1..=5)
-            .map(|i| row("hidden", "Raze", RAZE, 16, if i <= 2 { 0 } else { 31 }, i * 20, Some(5), i * 3, 20, -20))
-            .collect(),
+        enemies: vec![
+            row("들개처럼#KR1", "Raze", RAZE, 16, 0, 42, Some(5), 3, 20, -20),
+            row("커피한잔#0001", "Cypher", RAZE, 17, 0, 88, Some(5), 9, 20, -20),
+            row("야간비행#KR2", "Omen", RAZE, 19, 31, 130, Some(5), 12, 20, -20),
+            row("브림#stone", "Brimstone", RAZE, 20, 75, 57, Some(5), 15, 20, -20),
+            row("hidden", "Raze", RAZE, 16, 12, 21, None, 18, 20, -20),
+        ],
     }
 }
 
@@ -401,14 +413,68 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// UTF-16 conversion without a heap allocation for the common case.
+///
+/// `draw_text` runs 60-80 times per frame; a `Vec` per call showed up as the
+/// bulk of the paint cost in allocation churn rather than in GDI.
+struct WideBuf {
+    inline: [u16; 256],
+    heap: Option<Vec<u16>>,
+}
+
+impl WideBuf {
+    fn new(s: &str) -> Self {
+        let mut buf = WideBuf {
+            inline: [0; 256],
+            heap: None,
+        };
+        let mut n = 0;
+        for c in s.encode_utf16() {
+            if n + 1 < buf.inline.len() {
+                buf.inline[n] = c;
+                n += 1;
+            } else {
+                // Rare: a Riot ID long enough to overflow. Fall back to a Vec.
+                let mut v: Vec<u16> = s.encode_utf16().collect();
+                v.push(0);
+                buf.heap = Some(v);
+                return buf;
+            }
+        }
+        buf.inline[n] = 0;
+        if n + 1 < buf.inline.len() {
+            buf.inline[n + 1] = 0;
+        }
+        buf
+    }
+
+    fn as_ptr(&self) -> *const u16 {
+        match &self.heap {
+            Some(v) => v.as_ptr(),
+            None => self.inline.as_ptr(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match &self.heap {
+            Some(v) => v.len() - 1,
+            None => self
+                .inline
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(0),
+        }
+    }
+}
+
 unsafe fn draw_text(hdc: HDC, font: HFONT, text: &str, rc: &mut RECT, color: COLORREF, align: u32) {
     SelectObject(hdc, font);
     SetTextColor(hdc, color);
     SetBkMode(hdc, TRANSPARENT as i32);
-    let mut buf = wide(text);
+    let buf = WideBuf::new(text);
     DrawTextW(
         hdc,
-        buf.as_mut_ptr(),
+        buf.as_ptr() as *mut u16,
         -1,
         rc,
         DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | align,
@@ -416,12 +482,12 @@ unsafe fn draw_text(hdc: HDC, font: HFONT, text: &str, rc: &mut RECT, color: COL
 }
 
 /// Width of `text` in the given font, so labels can be placed right after it
-/// instead of at a guess. `wide` appends a NUL, hence `len - 1`.
+/// instead of at a guess.
 unsafe fn text_width(hdc: HDC, font: HFONT, text: &str) -> i32 {
     SelectObject(hdc, font);
-    let buf = wide(text);
+    let buf = WideBuf::new(text);
     let mut size = SIZE { cx: 0, cy: 0 };
-    GetTextExtentPoint32W(hdc, buf.as_ptr(), (buf.len() - 1) as i32, &mut size);
+    GetTextExtentPoint32W(hdc, buf.as_ptr(), buf.len() as i32, &mut size);
     size.cx
 }
 
@@ -604,6 +670,10 @@ unsafe fn paint_waiting(hwnd: HWND, hdc: HDC) -> RECT {
 /// Offscreen 32-bpp surface. The overlay renders here and then hands the whole
 /// bitmap to `UpdateLayeredWindow`, which is the only layered-window path where
 /// GDI keeps its text anti-aliasing.
+///
+/// Cached across frames: creating a DIB section, a compatible DC and zeroing
+/// 270 KB on every repaint is pure overhead when the window size has not
+/// changed. Only the alpha channel and the pixels are rewritten each frame.
 struct Surface {
     dc: HDC,
     bmp: HBITMAP,
@@ -612,8 +682,113 @@ struct Surface {
     h: i32,
 }
 
+static SURFACE: Mutex<Option<Surface>> = Mutex::new(None);
+
+// The surface holds GDI handles and a DIB pointer, both only ever touched on the
+// UI thread. The static exists so the bitmap survives between frames, not so it
+// can be shared.
+unsafe impl Send for Surface {}
+
+/// Cached coverage mask for the panel outline. The alpha channel depends only
+/// on the rect, the radius and the surface size, none of which change per frame.
+struct MaskCache {
+    key: (i32, i32, i32, i32, i32),
+    w: i32,
+    h: i32,
+    alpha: Vec<u8>,
+}
+
+static MASK_CACHE: Mutex<Option<MaskCache>> = Mutex::new(None);
+
+/// Per-pixel coverage for a rounded rectangle, computed once per geometry.
+fn build_mask(w: i32, h: i32, rc: RECT, radius: i32) -> Vec<u8> {
+    let r = radius as f32;
+    let (l, t, rr_, b) = (
+        rc.left as f32,
+        rc.top as f32,
+        rc.right as f32,
+        rc.bottom as f32,
+    );
+    let mut out = vec![0u8; (w * h) as usize];
+    for y in 0..h {
+        let py = y as f32 + 0.5;
+        for x in 0..w {
+            let px = x as f32 + 0.5;
+            // Distance outside the rectangle, per axis.
+            let ox = if px < l {
+                l - px
+            } else if px > rr_ {
+                px - rr_
+            } else {
+                0.0
+            };
+            let oy = if py < t {
+                t - py
+            } else if py > b {
+                py - b
+            } else {
+                0.0
+            };
+            let sd = if ox > 0.0 || oy > 0.0 {
+                (ox * ox + oy * oy).sqrt()
+            } else {
+                // Inside: distance to the nearest corner arc.
+                let qx = if px < l + r {
+                    l + r - px
+                } else if px > rr_ - r {
+                    px - (rr_ - r)
+                } else {
+                    0.0
+                };
+                let qy = if py < t + r {
+                    t + r - py
+                } else if py > b - r {
+                    py - (b - r)
+                } else {
+                    0.0
+                };
+                (qx * qx + qy * qy).sqrt() - r
+            };
+            let cov = (0.5 - sd).clamp(0.0, 1.0);
+            out[(y * w + x) as usize] = (cov * 255.0 + 0.5) as u8;
+        }
+    }
+    out
+}
+
 impl Surface {
-    unsafe fn new(w: i32, h: i32) -> Option<Surface> {
+    /// Returns the cached surface, recreating it only when the size changed.
+    unsafe fn get(w: i32, h: i32) -> Option<Surface> {
+        let mut slot = SURFACE.lock().ok()?;
+        if let Some(existing) = slot.as_ref() {
+            if existing.w == w && existing.h == h {
+                // Hand back a shallow copy: the owner is the static, and
+                // destroy() is a no-op for that reason.
+                return Some(Surface {
+                    dc: existing.dc,
+                    bmp: existing.bmp,
+                    bits: existing.bits,
+                    w,
+                    h,
+                });
+            }
+        }
+        if let Some(old) = slot.take() {
+            old.destroy_now();
+        }
+        let created = Surface::create(w, h)?;
+        *slot = Some(created);
+        let s = slot.as_ref()?;
+        Some(Surface {
+            dc: s.dc,
+            bmp: s.bmp,
+            bits: s.bits,
+            w,
+            h,
+        })
+    }
+
+    unsafe fn create(w: i32, h: i32) -> Option<Surface> {
         let screen = GetDC(std::ptr::null_mut());
         if screen.is_null() {
             return None;
@@ -640,11 +815,6 @@ impl Surface {
             return None;
         }
         SelectObject(dc, bmp as _);
-        // GDI leaves the alpha byte untouched, so start from fully transparent.
-        let all = std::slice::from_raw_parts_mut(bits as *mut u32, (w * h) as usize);
-        for p in all.iter_mut() {
-            *p = 0;
-        }
         Some(Surface {
             dc,
             bmp,
@@ -654,74 +824,64 @@ impl Surface {
         })
     }
 
+    /// Clears the whole surface to transparent black, ready for a new frame.
+    unsafe fn clear(&self) {
+        let all = std::slice::from_raw_parts_mut(self.bits, (self.w * self.h) as usize);
+        for p in all.iter_mut() {
+            *p = 0;
+        }
+    }
+
+    unsafe fn destroy_now(&self) {
+        DeleteObject(self.bmp as _);
+        DeleteObject(self.dc as _);
+    }
+
     /// Turns the rounded-rect outline into an alpha mask.
     ///
     /// GDI drawing writes no alpha, so the channel is rebuilt here: opaque
     /// inside the panel, transparent outside, one pixel of coverage on the
     /// corners. Interior RGB is premultiplied as `AC_SRC_ALPHA` requires.
+    ///
+    /// Cached: the panel outline never changes between frames, and this is a
+    /// per-pixel loop with two square roots, so recomputing it on every repaint
+    /// was the single most expensive thing the overlay did.
     unsafe fn mask_round(&self, rc: RECT, radius: i32) {
-        let r = radius as f32;
-        let (l, t, rr_, b) = (
-            rc.left as f32,
-            rc.top as f32,
-            rc.right as f32,
-            rc.bottom as f32,
-        );
-        let buf = std::slice::from_raw_parts_mut(self.bits, (self.w * self.h) as usize);
-        for y in 0..self.h {
-            let py = y as f32 + 0.5;
-            for x in 0..self.w {
-                let px = x as f32 + 0.5;
-                // Distance outside the rectangle, per axis.
-                let ox = if px < l {
-                    l - px
-                } else if px > rr_ {
-                    px - rr_
-                } else {
-                    0.0
-                };
-                let oy = if py < t {
-                    t - py
-                } else if py > b {
-                    py - b
-                } else {
-                    0.0
-                };
-                let sd = if ox > 0.0 || oy > 0.0 {
-                    (ox * ox + oy * oy).sqrt()
-                } else {
-                    // Inside: distance to the nearest corner arc.
-                    let qx = if px < l + r {
-                        l + r - px
-                    } else if px > rr_ - r {
-                        px - (rr_ - r)
-                    } else {
-                        0.0
-                    };
-                    let qy = if py < t + r {
-                        t + r - py
-                    } else if py > b - r {
-                        py - (b - r)
-                    } else {
-                        0.0
-                    };
-                    (qx * qx + qy * qy).sqrt() - r
-                };
-                let cov = (0.5 - sd).clamp(0.0, 1.0);
-                let a = (cov * 255.0 + 0.5) as u32;
-                let i = (y * self.w + x) as usize;
-                let p = buf[i];
-                buf[i] = if a == 0 {
-                    0
-                } else if a >= 255 {
-                    p | 0xFF00_0000
-                } else {
-                    let bl = (p & 0xFF) * a / 255;
-                    let gr = ((p >> 8) & 0xFF) * a / 255;
-                    let rd = ((p >> 16) & 0xFF) * a / 255;
-                    bl | (gr << 8) | (rd << 16) | (a << 24)
-                };
+        let key = (rc.left, rc.top, rc.right, rc.bottom, radius);
+        let cached = MASK_CACHE.lock().ok().and_then(|c| {
+            c.as_ref()
+                .filter(|m| m.key == key && m.w == self.w && m.h == self.h)
+                .map(|m| m.alpha.clone())
+        });
+        let alpha = match cached {
+            Some(a) => a,
+            None => {
+                let a = build_mask(self.w, self.h, rc, radius);
+                if let Ok(mut c) = MASK_CACHE.lock() {
+                    *c = Some(MaskCache {
+                        key,
+                        w: self.w,
+                        h: self.h,
+                        alpha: a.clone(),
+                    });
+                }
+                a
             }
+        };
+
+        let buf = std::slice::from_raw_parts_mut(self.bits, (self.w * self.h) as usize);
+        for (i, p) in buf.iter_mut().enumerate() {
+            let a = alpha[i] as u32;
+            *p = if a == 0 {
+                0
+            } else if a >= 255 {
+                *p | 0xFF00_0000
+            } else {
+                let bl = (*p & 0xFF) * a / 255;
+                let gr = ((*p >> 8) & 0xFF) * a / 255;
+                let rd = ((*p >> 16) & 0xFF) * a / 255;
+                bl | (gr << 8) | (rd << 16) | (a << 24)
+            };
         }
     }
 
@@ -749,11 +909,6 @@ impl Surface {
             ULW_ALPHA,
         );
     }
-
-    unsafe fn destroy(&self) {
-        DeleteObject(self.bmp as _);
-        DeleteObject(self.dc as _);
-    }
 }
 
 unsafe fn paint(hwnd: HWND) {
@@ -763,16 +918,17 @@ unsafe fn paint(hwnd: HWND) {
     if w <= 0 || h <= 0 {
         return;
     }
-    let Some(surf) = Surface::new(w, h) else {
+    let Some(surf) = Surface::get(w, h) else {
         return;
     };
+    // Reuse the bitmap, but every frame starts from transparent.
+    surf.clear();
 
     let view = state().lock().unwrap().clone();
     let panel = match view {
         Some(v) => draw_roster(surf.dc, &v, w, h),
         None => {
             if !WAITING.load(Ordering::Relaxed) {
-                surf.destroy();
                 return;
             }
             paint_waiting(hwnd, surf.dc)
@@ -780,7 +936,6 @@ unsafe fn paint(hwnd: HWND) {
     };
     surf.mask_round(panel, PANEL_RADIUS);
     surf.present(hwnd);
-    surf.destroy();
 }
 
 /// Draws the roster into `hdc` and returns the panel outline, which becomes the
@@ -1329,7 +1484,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     .lock()
                     .unwrap()
                     .as_ref()
-                    .map(view_height)
+                    .map(|v| view_height(v))
                     .unwrap_or(HEIGHT);
                 let h = h.min(GetSystemMetrics(SM_CYSCREEN) - 48).max(120);
                 SetWindowPos(
@@ -1504,7 +1659,7 @@ pub fn run(demo: bool) -> anyhow::Result<()> {
 
         // Polling worker: HTTP must never run on the UI thread.
         if demo {
-            *state().lock().unwrap() = Some(demo_view());
+            *state().lock().unwrap() = Some(Arc::new(demo_view()));
         } else {
             // Presence events wake the worker immediately. The timer below is only
             // a fallback (and the only trigger if the WebSocket cannot connect).
@@ -1535,13 +1690,13 @@ pub fn run(demo: bool) -> anyhow::Result<()> {
                                         });
                                     }
                                 }
-                                Some(View {
+                                Some(Arc::new(View {
                                     map: lobby.map,
                                     mode: lobby.mode,
                                     state: lobby.state,
                                     allies: lobby.allies,
                                     enemies: lobby.enemies,
-                                })
+                                }))
                             }
                             _ => None,
                         },
@@ -1580,7 +1735,7 @@ pub fn run(demo: bool) -> anyhow::Result<()> {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .map(view_height)
+                .map(|v| view_height(v))
                 .unwrap_or(HEIGHT)
                 .min(GetSystemMetrics(SM_CYSCREEN) - 48);
             SetWindowPos(
