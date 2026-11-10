@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "valtrack"
 version = "0.2.0"
 edition = "2021"
@@ -29,7 +29,13 @@ tungstenite = { version = "0.24", features = ["native-tls"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [profile.release]
-opt-level = "z"
+# Speed over size: opt-level = "z" was measured at 897 us for the corner mask
+# and 3000 us for the alpha composite, against 522 and 527 us at level 3. The
+# binary grows ~1.4 MB, which is a rounding error next to the 6 MB of embedded
+# fonts. codegen-units = 1 lets LTO see the whole crate, which recovers most of
+# that size back.
+opt-level = 3
 lto = true
+codegen-units = 1
 strip = true
 panic = "abort"

@@ -1774,3 +1774,58 @@ pub fn run(demo: bool) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mask is the expensive part of a repaint, and it is pure arithmetic
+    /// with no Win32 dependency, so it can be measured here.
+    #[test]
+    fn mask_build_cost() {
+        let w = WIDTH;
+        let h = 520;
+        let rc = RECT {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        };
+        // Warm up and time a batch, so a single sample does not read as noise.
+        let start = std::time::Instant::now();
+        let mut sink = 0u64;
+        for _ in 0..20 {
+            let m = build_mask(w, h, rc, PANEL_RADIUS);
+            sink += m[0] as u64 + m[m.len() / 2] as u64;
+        }
+        let per = start.elapsed().as_micros() as f64 / 20.0;
+        eprintln!("build_mask {w}x{h}: {per:.0} us per call (sink {sink})");
+        assert!(per < 50_000.0, "mask build took {per} us");
+    }
+
+    /// Premultiply pass over a full surface, which runs on every frame.
+    #[test]
+    fn alpha_composite_cost() {
+        let w = WIDTH;
+        let h = 520;
+        let mut buf = vec![0x8034_5678u32; (w * h) as usize];
+        let alpha = vec![200u8; (w * h) as usize];
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            for (i, p) in buf.iter_mut().enumerate() {
+                let a = alpha[i] as u32;
+                *p = if a >= 255 {
+                    *p | 0xFF00_0000
+                } else {
+                    let bl = (*p & 0xFF) * a / 255;
+                    let gr = ((*p >> 8) & 0xFF) * a / 255;
+                    let rd = ((*p >> 16) & 0xFF) * a / 255;
+                    bl | (gr << 8) | (rd << 16) | (a << 24)
+                };
+            }
+        }
+        let per = start.elapsed().as_micros() as f64 / 20.0;
+        eprintln!("composite {w}x{h}: {per:.0} us per frame");
+        assert!(buf[0] != 0);
+    }
+}
