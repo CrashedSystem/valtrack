@@ -1,15 +1,19 @@
 # valtrack
 
-Overwolf 없는 VALORANT 라이브 매치 트래커. Rust, 단일 exe 3.6MB.
+Overwolf 없는 VALORANT 라이브 매치 트래커. Rust, 단일 exe.
 
 ## 다운로드 / 설치
 
 1. [Releases](../../releases)에서 `valtrack-v*-win64.zip`을 받는다.
-2. 압축을 풀고 `valtrack.exe`를 더블클릭한다. 설치 프로그램·관리자 권한·런타임 설치가 없다
-   (Rust 정적 링크, VC++ 재배포 불필요).
-3. 더블클릭(=인자 없음)은 **오버레이**를 띄운다. 콘솔 출력은 `valtrack.exe live`로 실행한다.
+2. 압축을 풀고 **`valtrack-setup.exe`를 더블클릭**한다. `설치` 버튼을 누르면 끝이다.
+   - `%LOCALAPPDATA%\valtrack\`에 설치되고, 로그인 시 자동 시작에 등록되며, 감시 프로세스가 바로 뜬다.
+   - 관리자 권한이 필요 없다(사용자 프로필에만 씀). `제거` 버튼으로 흔적 없이 지운다.
+3. 이제 **VALORANT 를 켜면 오버레이가 자동으로** 뜨고, 게임을 끄면 같이 사라진다.
 4. 해시 확인: `Get-FileHash .\valtrack-v*-win64.zip -Algorithm SHA256` 값이 릴리스의
    `SHA256SUMS.txt`와 같아야 한다.
+
+설치 프로그램 없이 쓰려면 압축을 푼 `valtrack.exe`를 그대로 실행해도 된다. 이 경우 자동 시작이
+없으니 `valtrack.exe install`로 직접 설치하거나, 게임 중에 `valtrack.exe overlay`를 실행한다.
 
 서명되지 않은 바이너리라 첫 실행 시 **SmartScreen**(“Windows에서 PC를 보호했습니다”)이 뜰 수
 있다. `추가 정보` → `실행`을 누르면 되고, Defender가 격리했다면 복원 후 제외 목록에 폴더를
@@ -169,10 +173,26 @@ valtrack.exe overlay    # 게임 위에 항상-위 오버레이 (클릭 통과, 
 valtrack.exe overlay --demo   # 게임 없이 오버레이 렌더 확인
 valtrack.exe agent      # VALORANT 실행 중에만 오버레이를 띄우는 감시자
 valtrack.exe agent --stop
-valtrack.exe autostart  # 로그인 시 agent 자동 시작 (HKCU Run)
+valtrack.exe install    # %LOCALAPPDATA% 로 복사 + 자동 시작 등록 + 감시자 시작
+valtrack.exe uninstall  # 자동 시작 해제 + 감시자 종료 + 설치본 삭제
+valtrack.exe status     # 설치 여부 / 자동 시작 / 감시자 / 게임 실행 상태
+valtrack.exe autostart  # 로그인 시 agent 자동 시작 (HKCU Run) - install 이 대신 해준다
 valtrack.exe autostart --remove
 valtrack.exe --json live
 ```
+
+### GUI 설치 프로그램
+
+`valtrack-setup.exe`는 같은 일을 버튼으로 한다. 본체와 **별도 바이너리**라 오버레이 exe 에는
+UI 코드가 들어가지 않는다. 설치 위치·레지스트리 값·감시자 규칙은 `src/install.rs` 하나를
+공유하므로 GUI 와 CLI 가 서로 다르게 동작할 수 없다.
+
+```powershell
+valtrack-setup.exe
+```
+
+`설치` / `제거` / `닫기` 세 버튼과 현재 상태 한 줄. 작업은 워커 스레드에서 돌아 창이 멈추지
+않고, 감시자가 실행 중이어도 재설치할 수 있다(임시 이름으로 복사한 뒤 rename).
 
 ### 게임 실행/종료에 맞추기
 

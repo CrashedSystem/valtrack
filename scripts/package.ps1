@@ -1,5 +1,6 @@
-# Packages what a release needs: a portable zip (exe + README + LICENSE) and a
-# SHA-256 checksum users can verify before running an unsigned binary.
+# Packages what a release needs: both binaries (app + GUI installer), README and
+# LICENSE, plus a SHA-256 checksum someone can verify before running an unsigned
+# binary.
 #
 #   powershell -File scripts\package.ps1
 #   powershell -File scripts\package.ps1 -Version 0.1.1
@@ -19,15 +20,22 @@ if (-not $Version) {
   }
 }
 
-$exe = Join-Path $repo "dist\valtrack.exe"
-if (-not (Test-Path $exe)) {
-  throw "missing $exe - run scripts/build.sh first"
+# Both binaries ship together: setup copies valtrack.exe from its own directory,
+# so the two must stay side by side in the zip.
+$bins = @("valtrack.exe", "valtrack-setup.exe")
+foreach ($name in $bins) {
+  $p = Join-Path $repo "dist\$name"
+  if (-not (Test-Path $p)) {
+    throw "missing $p - run scripts/build.sh first"
+  }
 }
 
 $stage = Join-Path $env:TEMP ("valtrack-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $stage | Out-Null
 try {
-  Copy-Item $exe (Join-Path $stage "valtrack.exe")
+  foreach ($name in $bins) {
+    Copy-Item (Join-Path $repo "dist\$name") (Join-Path $stage $name)
+  }
   foreach ($name in "README.md", "LICENSE") {
     $p = Join-Path $repo $name
     if (-not (Test-Path $p)) { throw "missing $p" }
@@ -38,8 +46,8 @@ try {
   New-Item -ItemType Directory -Force -Path $outDir | Out-Null
   $stem = "valtrack-v$Version-win64"
   $zip = Join-Path $outDir "$stem.zip"
-  Remove-Item $zip -ErrorAction SilentlyContinue
-  Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -CompressionLevel Optimal
+  Remove-Item $zip -Force -ErrorAction SilentlyContinue
+  Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -CompressionLevel Optimal -Force
 
   $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
   $sums = Join-Path $outDir "SHA256SUMS.txt"
