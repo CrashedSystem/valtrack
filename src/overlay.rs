@@ -18,8 +18,8 @@ use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
     FillRect, GetDC, GetTextExtentPoint32W, ReleaseDC, SelectObject, SetBkMode,
     SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
-    DIB_RGB_COLORS, HBITMAP, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_END_ELLIPSIS, DT_LEFT,
-    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD, FW_NORMAL, HDC, HFONT,
+    DIB_RGB_COLORS, HBITMAP, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_END_ELLIPSIS,
+    DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD, FW_NORMAL, HDC, HFONT,
     OUT_TT_PRECIS, TRANSPARENT,
 };
 use windows_sys::Win32::System::Console::FreeConsole;
@@ -51,15 +51,16 @@ const MENU_TOGGLE: usize = 1;
 const MENU_QUIT: usize = 2;
 const MENU_UPDATE: usize = 3;
 
-const WIDTH: i32 = 500;
+const WIDTH: i32 = 520;
 const HEIGHT: i32 = 520;
 const ROW_H: i32 = 52;
 /// Corner radius of the panel and of the round popup controls.
 const PANEL_RADIUS: i32 = 10;
 /// Window height while no match is running.
 const WAITING_H: i32 = 104;
-/// Width reserved on the right for the rank bar, tier label and RR.
-const RANK_COL: i32 = 172;
+/// Width reserved on the right for the rank block: crest, tier name, RR and the
+/// tier bar. Wide enough that "다이아몬드 1" and "59 RR" fit on one line.
+const RANK_COL: i32 = 190;
 /// Height of the tier progress bar.
 const BAR_H: i32 = 4;
 /// Agent portrait and rank crest, in real device pixels. Icons are resampled to
@@ -77,8 +78,6 @@ fn rgb(r: u32, g: u32, b: u32) -> COLORREF {
 const BG: COLORREF = 0x0010_0C0D;
 /// Row hairlines: barely-there separation between players.
 const HAIR: COLORREF = 0x002E_2226;
-/// Stronger rule, for the boundary between the name column and the rank column.
-const RULE: COLORREF = 0x0042_383D;
 const WHITE: COLORREF = 0x00F5_F1F2;
 const DIM: COLORREF = 0x0098_878B;
 const MUTED: COLORREF = 0x0058_4C69;
@@ -991,21 +990,36 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
     }
 
     let icon_x = PAD;
+    let icon_y = y + (ROW_H - ICON_AGENT) / 2;
     // ICON_AGENT: resampled to this exact size at load, then blitted 1:1.
     if let Some(icon) = crate::icons::agent_icon(&row.agent_id, ICON_AGENT) {
-        crate::icons::draw(hdc, &icon, icon_x, y + (ROW_H - ICON_AGENT) / 2, ICON_AGENT);
+        crate::icons::draw(hdc, &icon, icon_x, icon_y, ICON_AGENT);
     }
 
     // Right column is fixed-width so every RR lines up.
     let right = WIDTH - PAD;
-    let rr_x = right;
 
-    // Name: stops before the rank block so long KR names ellipsize cleanly.
-    let name_left = icon_x + ICON_AGENT + 8;
+    let name_left = icon_x + ICON_AGENT + 10;
+    let col_right = right - RANK_COL - 14;
+
+    // Level: right-aligned at the end of the name line, on its own fixed slot so
+    // a long Riot ID truncates instead of shoving it around. Lv is the one number
+    // that belongs beside the name - it describes the account, not the match.
+    let level_text = if !row.hide_level && row.level > 0 && row.level < 1000 {
+        Some(row.level.to_string())
+    } else {
+        None
+    };
+    let level_w = level_text
+        .as_ref()
+        .map(|t| text_width(hdc, f_small, t))
+        .unwrap_or(0);
+
+    // Name: drawn first so its measured width decides where the level goes.
     let mut name_rc = RECT {
         left: name_left,
         top: y + 3,
-        right: right - RANK_COL,
+        right: col_right - level_w - 8,
         bottom: y + 21,
     };
     let name_color = if row.is_me { ACCENT } else { WHITE };
@@ -1022,18 +1036,19 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
     };
     draw_text(hdc, f_name, &name_text, &mut name_rc, name_color, DT_LEFT);
 
-    // Level, right after the name's slot but before the rank block: a small
-    // number most players glance at to judge account age.
-    if !row.hide_level && row.level > 0 {
-        let level_text = format!("Lv {}", row.level);
-        let level_w = text_width(hdc, f_small, &level_text);
+    // Level follows the name's actual width, so it reads as "name, level" rather
+    // than floating in the middle of the row. If the name filled its slot the
+    // level lands at the edge, which is the best available fallback.
+    if let Some(text) = &level_text {
+        let drawn = text_width(hdc, f_name, &name_text).min(name_rc.right - name_left);
+        let lv_x = (name_left + drawn + 7).min(col_right - level_w);
         let mut lv_rc = RECT {
-            left: right - RANK_COL - level_w - 4,
-            top: y + 4,
-            right: right - RANK_COL - 4,
-            bottom: y + 20,
+            left: lv_x,
+            top: y + 3,
+            right: lv_x + level_w + 2,
+            bottom: y + 21,
         };
-        draw_text(hdc, f_small, &level_text, &mut lv_rc, MUTED, DT_RIGHT);
+        draw_text(hdc, f_small, text, &mut lv_rc, MUTED, DT_LEFT);
     }
 
     // Second line: agent · win record · party. Every fact we hold, packed.
@@ -1059,7 +1074,7 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
     let mut sub_rc = RECT {
         left: name_left,
         top: y + 19,
-        right: right - RANK_COL,
+        right: col_right,
         bottom: y + 36,
     };
     draw_text(hdc, f_small, &sub, &mut sub_rc, MUTED, DT_LEFT);
@@ -1069,7 +1084,7 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         let label = party_label(Some(n));
         let sw = text_width(hdc, f_small, &sub);
         let lw = text_width(hdc, f_small, &label);
-        let limit = right - RANK_COL - lw;
+        let limit = col_right - lw;
         let px = (name_left + sw + 7).min(limit).max(name_left);
         let mut pr = RECT {
             left: px,
@@ -1143,7 +1158,7 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         };
         // Fit by dropping from the tail rather than letting GDI clip mid-word.
         // The items are already in priority order.
-        let avail = right - RANK_COL - name_left;
+        let avail = col_right - name_left;
         let mut text = third.join("  ·  ");
         while third.len() > 1 && text_width(hdc, f_small, &text) > avail {
             third.pop();
@@ -1152,7 +1167,7 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         let mut tr = RECT {
             left: name_left,
             top: y + 35,
-            right: right - RANK_COL,
+            right: col_right,
             bottom: y + ROW_H - 1,
         };
         draw_text(hdc, f_small, &text, &mut tr, color, DT_LEFT);
@@ -1167,23 +1182,26 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
     let col_left = right - RANK_COL;
     let col_w = RANK_COL;
 
-    // Vertical hairline: the rank column is a distinct field, not a continuation
-    // of the name. Without it the level and the tier ran together as one string.
-    let sep = RECT {
-        left: col_left - 12,
-        top: y + 8,
-        right: col_left - 11,
-        bottom: y + ROW_H - 8,
-    };
-    fill(hdc, &sep, RULE);
-
     if row.tier > 2 {
         let tier = crate::rank::tier_name_ko(row.tier);
+
+        // Crest first, then the tier name and RR. The crest is what makes the
+        // tier recognisable at a glance; the bar says how deep into it.
+        if let Some(icon) = crate::icons::rank_icon(row.tier, ICON_RANK) {
+            crate::icons::draw(
+                hdc,
+                &icon,
+                col_left,
+                y + (ROW_H - ICON_RANK) / 2 - 2,
+                ICON_RANK,
+            );
+        }
+        let text_left = col_left + ICON_RANK + 8;
 
         // Upper line: tier name left, RR right.
         let rr_text = format!("{} RR", row.rr);
         let mut rr_rc = RECT {
-            left: col_left,
+            left: text_left,
             top: y + 4,
             right: col_left + col_w,
             bottom: y + 20,
@@ -1192,37 +1210,39 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
 
         let rr_w = text_width(hdc, f_small, &rr_text);
         let mut tr = RECT {
-            left: col_left,
+            left: text_left,
             top: y + 4,
             right: col_left + col_w - rr_w - 6,
             bottom: y + 20,
         };
         draw_text(hdc, f_rank, tier, &mut tr, WHITE, DT_LEFT);
 
-        // Bar: money occupied inside the current tier, 0..100 RR. Two notches
+        // Bar: progress inside the current division, 0..100 RR. Two notches
         // mark the division boundaries so the fill reads as progress through a
         // tier rather than as an arbitrary gauge.
-        let bar_top = y + 22;
+        let bar_left = text_left;
+        let bar_w = col_left + col_w - bar_left;
+        let bar_top = y + 23;
         let track = RECT {
-            left: col_left,
+            left: bar_left,
             top: bar_top,
-            right: col_left + col_w,
+            right: bar_left + bar_w,
             bottom: bar_top + BAR_H,
         };
         fill_round(hdc, &track, 2, TRACK);
         let pct = (row.rr.clamp(0, 100) as f32 / 100.0).max(0.06);
-        let filled_w = ((col_w as f32) * pct) as i32;
+        let filled_w = ((bar_w as f32) * pct) as i32;
         let bar = RECT {
-            left: col_left,
+            left: bar_left,
             top: bar_top,
-            right: col_left + filled_w.max(2),
+            right: bar_left + filled_w.max(2),
             bottom: bar_top + BAR_H,
         };
         fill_round(hdc, &bar, 2, tier_color(row.tier));
         // Notches last, so the fill cannot paint over them. They mark the two
         // division boundaries: the fill still means "RR inside this division".
         for third in [1, 2] {
-            let x = col_left + col_w * third / 3;
+            let x = bar_left + bar_w * third / 3;
             let notch = RECT {
                 left: x,
                 top: bar_top,
@@ -1237,10 +1257,10 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
             if !peak.is_empty() && peak != tier {
                 let text = format!("최고 {peak}");
                 let mut pr = RECT {
-                    left: col_left,
-                    top: y + 28,
+                    left: text_left,
+                    top: y + 30,
                     right: col_left + col_w,
-                    bottom: y + 44,
+                    bottom: y + ROW_H - 2,
                 };
                 draw_text(hdc, f_small, &text, &mut pr, MUTED, DT_LEFT);
             }

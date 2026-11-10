@@ -37,7 +37,6 @@ const ID_INSTALL: usize = 1001;
 const ID_UNINSTALL: usize = 1002;
 const ID_CLOSE: usize = 1003;
 
-const WM_APP_REFRESH: u32 = 0x8000 + 1;
 const WM_APP_STATUS: u32 = 0x8000 + 2;
 
 const W: i32 = 460;
