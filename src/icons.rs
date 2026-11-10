@@ -3,9 +3,15 @@
 //! The PNGs are embedded into the binary (`assets.rs`), so rendering never
 //! touches the network and there is no first-paint stall.
 //!
-//! GDI drawing: decode PNG -> RGBA -> 32bpp top-down DIB section -> AlphaBlend.
+//! The icons ship at 64x64 (agents) and 32x32 (ranks) but are drawn at 24 and
+//! 20 px. Handing that reduction to `AlphaBlend` makes GDI drop pixels instead
+//! of blending them, which is why the artwork looked stair-stepped. So each
+//! icon is resampled once, with Lanczos, to exactly the size it is drawn at,
+//! and premultiplied so `AC_SRC_ALPHA` blends without a bright fringe. Drawing
+//! is then a 1:1 blit: no scaling, no resampling, no artefacts.
 
 use crate::assets;
+use image::imageops::FilterType;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -46,8 +52,15 @@ pub struct Icon {
 }
 
 impl Icon {
-    fn from_png(bytes: &[u8]) -> Option<Self> {
-        let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    /// Decodes `bytes`, resamples to `size` x `size` and premultiplies.
+    fn from_png(bytes: &[u8], size: i32) -> Option<Self> {
+        let src = image::load_from_memory(bytes).ok()?.to_rgba8();
+        let size = size.max(1) as u32;
+        let img = if src.width() != size || src.height() != size {
+            image::imageops::resize(&src, size, size, FilterType::Lanczos3)
+        } else {
+            src
+        };
         let (w, h) = img.dimensions();
         let rgba = img.as_raw();
 
@@ -90,10 +103,15 @@ impl Icon {
 
             let dst = std::slice::from_raw_parts_mut(bits as *mut u8, (w * h * 4) as usize);
             for i in 0..(w * h) as usize {
-                dst[i * 4] = rgba[i * 4 + 2];
-                dst[i * 4 + 1] = rgba[i * 4 + 1];
-                dst[i * 4 + 2] = rgba[i * 4];
-                dst[i * 4 + 3] = rgba[i * 4 + 3];
+                let a = rgba[i * 4 + 3] as u32;
+                // Premultiply so AC_SRC_ALPHA composites correctly. Without it
+                // the anti-aliased edge pixels stay at full intensity and read
+                // as a light halo against the dark panel.
+                let pm = |c: u8| ((c as u32 * a + 127) / 255) as u8;
+                dst[i * 4] = pm(rgba[i * 4 + 2]);
+                dst[i * 4 + 1] = pm(rgba[i * 4 + 1]);
+                dst[i * 4 + 2] = pm(rgba[i * 4]);
+                dst[i * 4 + 3] = a as u8;
             }
 
             Some(Self {
@@ -121,18 +139,18 @@ unsafe impl Sync for Icon {}
 
 static CACHE: OnceLock<Mutex<HashMap<String, Option<Arc<Icon>>>>> = OnceLock::new();
 
-fn cached(key: &str, bytes: &[u8]) -> Option<Arc<Icon>> {
+fn cached(key: String, bytes: &[u8], size: i32) -> Option<Arc<Icon>> {
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = cache.lock().unwrap();
-    if let Some(hit) = guard.get(key) {
+    if let Some(hit) = guard.get(&key) {
         return hit.clone();
     }
-    let icon = Icon::from_png(bytes).map(Arc::new);
-    guard.insert(key.to_string(), icon.clone());
+    let icon = Icon::from_png(bytes, size).map(Arc::new);
+    guard.insert(key, icon.clone());
     icon
 }
 
-pub fn agent_icon(agent_id: &str) -> Option<Arc<Icon>> {
+pub fn agent_icon(agent_id: &str, size: i32) -> Option<Arc<Icon>> {
     if agent_id.is_empty() {
         return None;
     }
@@ -141,10 +159,10 @@ pub fn agent_icon(agent_id: &str) -> Option<Arc<Icon>> {
         .iter()
         .find(|(uuid, _)| *uuid == id)
         .map(|(_, b)| *b)?;
-    cached(&format!("agent:{id}"), bytes)
+    cached(format!("agent:{id}:{size}"), bytes, size)
 }
 
-pub fn rank_icon(tier: i64) -> Option<Arc<Icon>> {
+pub fn rank_icon(tier: i64, size: i32) -> Option<Arc<Icon>> {
     if tier <= 0 {
         return None;
     }
@@ -152,15 +170,18 @@ pub fn rank_icon(tier: i64) -> Option<Arc<Icon>> {
         .iter()
         .find(|(t, _)| *t == tier)
         .map(|(_, b)| *b)?;
-    cached(&format!("rank:{tier}"), bytes)
+    cached(format!("rank:{tier}:{size}"), bytes, size)
 }
 
-pub unsafe fn draw(hdc: HDC, icon: &Icon, x: i32, y: i32, size: i32) {
+/// Blits at the icon's own pixel size. `size` is accepted so callers keep
+/// reading the same way, but scaling happens at load time, not here.
+pub unsafe fn draw(hdc: HDC, icon: &Icon, x: i32, y: i32, _size: i32) {
     let blend = BlendFunction {
         blend_op: 0,
-        blend_flags: 0,
+        // AC_SRC_ALPHA: the DIB carries premultiplied alpha.
+        blend_flags: 1,
         source_constant_alpha: 255,
         alpha_format: 1,
     };
-    AlphaBlend(hdc, x, y, size, size, icon.dc, 0, 0, icon.w, icon.h, blend);
+    AlphaBlend(hdc, x, y, icon.w, icon.h, icon.dc, 0, 0, icon.w, icon.h, blend);
 }

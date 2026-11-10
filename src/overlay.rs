@@ -1,4 +1,4 @@
-//! Always-on-top, click-through overlay rendered with GDI.
+﻿//! Always-on-top, click-through overlay rendered with GDI.
 //!
 //! A magenta colour key makes the background fully transparent, WS_EX_TRANSPARENT
 //! makes the window click-through so it never steals input from the game.
@@ -15,11 +15,12 @@ use windows_sys::Win32::Foundation::{
     SIZE, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
-    FrameRect, GetTextExtentPoint32W, InvalidateRect, SelectObject, SetBkMode, SetTextColor,
-    CLIP_DEFAULT_PRECIS,
-    DEFAULT_CHARSET, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE,
-    FW_BOLD, FW_NORMAL, HDC, HFONT, OUT_TT_PRECIS, PAINTSTRUCT, TRANSPARENT,
+    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
+    FillRect, GetDC, GetTextExtentPoint32W, InvalidateRect, ReleaseDC, SelectObject, SetBkMode,
+    SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
+    DIB_RGB_COLORS, HBITMAP, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_END_ELLIPSIS, DT_LEFT,
+    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD, FW_NORMAL, HDC, HFONT,
+    OUT_TT_PRECIS, TRANSPARENT,
 };
 use windows_sys::Win32::System::Console::FreeConsole;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -33,13 +34,12 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     DispatchMessageW, FindWindowW, GetClientRect, GetCursorPos, GetMessageW, GetSystemMetrics,
-    LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, TrackPopupMenu,
-    TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, LWA_COLORKEY, MF_SEPARATOR, MF_STRING, MSG,
-    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_ERASEBKGND,
-    WM_HOTKEY, WM_LBUTTONDBLCLK, WM_PAINT, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer,
+    SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage, UpdateLayeredWindow, CS_HREDRAW,
+    CS_VREDRAW, HMENU, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA,
+    WM_APP, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_PAINT, WM_RBUTTONUP, WM_TIMER,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 const WM_REFRESH: u32 = WM_APP + 1;
@@ -51,36 +51,35 @@ const MENU_TOGGLE: usize = 1;
 const MENU_QUIT: usize = 2;
 const MENU_UPDATE: usize = 3;
 
-const WIDTH: i32 = 420;
-const HEIGHT: i32 = 560;
-const ROW_H: i32 = 40;
+const WIDTH: i32 = 392;
+const HEIGHT: i32 = 520;
+const ROW_H: i32 = 36;
+/// Corner radius of the panel and of the round popup controls.
+const PANEL_RADIUS: i32 = 10;
+/// Window height while no match is running.
+const WAITING_H: i32 = 104;
+/// Agent portrait and rank crest, in real device pixels. Icons are resampled to
+/// these sizes once at load, so they are drawn 1:1 instead of being scaled by
+/// AlphaBlend (which drops pixels and looks stair-stepped).
+const ICON_AGENT: i32 = 24;
+const ICON_RANK: i32 = 22;
 /// Left edge of the content column (panel border + gutter).
-const PAD: i32 = 18;
+const PAD: i32 = 16;
 
 fn rgb(r: u32, g: u32, b: u32) -> COLORREF {
     r | (g << 8) | (b << 16)
 }
 
-const KEY: COLORREF = 0x00FF_00FF; // magenta -> punched out
-/// Panel surface. Deep navy-black, a touch warmer than pure black so it reads as
-/// a designed surface rather than a hole in the screen.
-const BG: COLORREF = 0x0014_1218;
-/// Elevated surface for team headers and the local row.
-const SURFACE: COLORREF = 0x0022_1F29;
-const BORDER: COLORREF = 0x0033_2E40;
-const DIVIDER: COLORREF = 0x0020_1D26;
-const WHITE: COLORREF = 0x00FA_F9FC;
-const DIM: COLORREF = 0x00B0_ACBB;
-const MUTED: COLORREF = 0x007A_7686;
-const ACCENT: COLORREF = 0x0055_46FF;
-/// Local player's row: a lifted surface plus an accent stripe, so it is obvious
-/// without tinting the text.
-const ME_ROW: COLORREF = 0x0026_222F;
-const ME_BAR: COLORREF = 0x0055_46FF;
-/// Ally tint: VALORANT teal.
-const ALLY: COLORREF = 0x0055_46FF;
-/// Enemy tint: warm amber, which reads as "them" without a harsh red.
-const ENEMY: COLORREF = 0x00FF_A8_5A;
+const BG: COLORREF = 0x0010_0C0D;
+const HAIR: COLORREF = 0x002E_2226;
+const WHITE: COLORREF = 0x00F5_F1F2;
+const DIM: COLORREF = 0x0098_878B;
+const MUTED: COLORREF = 0x0058_4C69;
+const ACCENT: COLORREF = 0x00E7_5C6C;
+const ALLY: COLORREF = 0x00E7_5C6C;
+const ENEMY: COLORREF = 0x005C_A0E8;
+/// Local player's row background: one step up from the panel.
+const ME_ROW: COLORREF = 0x0020_1719;
 
 /// Party size -> rail colour. Premade groups are the single most useful thing
 /// on this panel, so each size gets its own hue and a bar down the row.
@@ -116,7 +115,9 @@ fn avg_rank(rows: &[Row]) -> String {
 /// window and clip the last rows.
 fn view_height(v: &View) -> i32 {
     let rows = |n: usize| (n.max(1) as i32) * ROW_H;
-    62 + 20 + rows(v.allies.len()) + 4 + 14 + 20 + rows(v.enemies.len()) + 34
+    // header (58) + ally label (20) + ally rows + gap (10) + enemy label (20)
+    // + enemy rows + footer (44, so the last row never touches the hint line)
+    58 + 20 + rows(v.allies.len()) + 10 + 20 + rows(v.enemies.len()) + 44
 }
 
 #[derive(Clone, Default)]
@@ -404,7 +405,12 @@ unsafe fn text_width(hdc: HDC, font: HFONT, text: &str) -> i32 {
 
 unsafe fn fonts() -> (HFONT, HFONT, HFONT, HFONT, HFONT) {
     let (title, name, team, rank, small) = *FONTS.get_or_init(|| {
-        let face = wide("Malgun Gothic");
+        crate::fonts::load();
+        let face = wide(if crate::fonts::loaded() {
+            crate::fonts::FAMILY
+        } else {
+            "Malgun Gothic"
+        });
         let mk = |h: i32, w: i32| {
             CreateFontW(
                 -h,
@@ -423,12 +429,14 @@ unsafe fn fonts() -> (HFONT, HFONT, HFONT, HFONT, HFONT) {
                 face.as_ptr(),
             ) as usize
         };
+        // CleanerText / ClearType-ish smoothing is off by default for layered
+        // windows; these sizes match the v0 mockup's type ramp.
         (
-            mk(17, FW_BOLD as i32),
             mk(15, FW_BOLD as i32),
             mk(13, FW_BOLD as i32),
-            mk(13, FW_BOLD as i32),
-            mk(12, FW_NORMAL as i32),
+            mk(11, FW_BOLD as i32),
+            mk(11, 600),
+            mk(10, FW_NORMAL as i32),
         )
     });
     (
@@ -448,7 +456,7 @@ unsafe fn divider(hdc: HDC, y: i32) {
         right: WIDTH - PAD,
         bottom: y + 1,
     };
-    let brush = CreateSolidBrush(DIVIDER);
+    let brush = CreateSolidBrush(HAIR);
     FillRect(hdc, &rc, brush);
     DeleteObject(brush);
 }
@@ -508,20 +516,17 @@ unsafe fn card(hdc: HDC, rc: &RECT, radius: i32, body: COLORREF, edge: COLORREF)
 
 /// Small always-on-top strip shown when the user asks for the overlay but no
 /// match is running, so a double-click visibly does something.
-unsafe fn paint_waiting(hwnd: HWND, hdc: HDC) {
+unsafe fn paint_waiting(hwnd: HWND, hdc: HDC) -> RECT {
     let _ = hwnd;
     let (f_title, _f_name, _f_team, _f_rank, f_small) = fonts();
 
     let panel = RECT {
-        left: 8,
-        top: 8,
-        right: WIDTH - 8,
-        bottom: 96,
+        left: 0,
+        top: 0,
+        right: WIDTH,
+        bottom: WAITING_H,
     };
-    fill(hdc, &panel, BG);
-    let border = CreateSolidBrush(BORDER);
-    FrameRect(hdc, &panel, border);
-    DeleteObject(border);
+    card(hdc, &panel, PANEL_RADIUS, BG, HAIR);
 
     let mut rc = RECT {
         left: PAD,
@@ -568,47 +573,213 @@ unsafe fn paint_waiting(hwnd: HWND, hdc: HDC) {
         MUTED,
         DT_LEFT,
     );
+    panel
+}
+
+/// Height of the waiting strip: header, one line, one hint line.
+
+/// Offscreen 32-bpp surface. The overlay renders here and then hands the whole
+/// bitmap to `UpdateLayeredWindow`, which is the only layered-window path where
+/// GDI keeps its text anti-aliasing.
+struct Surface {
+    dc: HDC,
+    bmp: HBITMAP,
+    bits: *mut u32,
+    w: i32,
+    h: i32,
+}
+
+impl Surface {
+    unsafe fn new(w: i32, h: i32) -> Option<Surface> {
+        let screen = GetDC(std::ptr::null_mut());
+        if screen.is_null() {
+            return None;
+        }
+        let mut bmi: BITMAPINFO = std::mem::zeroed();
+        bmi.bmiHeader = BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            biSizeImage: 0,
+            biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0,
+            biClrUsed: 0,
+            biClrImportant: 0,
+        };
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let bmp = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+        let dc = CreateCompatibleDC(screen);
+        ReleaseDC(std::ptr::null_mut(), screen);
+        if bmp.is_null() || dc.is_null() || bits.is_null() {
+            return None;
+        }
+        SelectObject(dc, bmp as _);
+        // GDI leaves the alpha byte untouched, so start from fully transparent.
+        let all = std::slice::from_raw_parts_mut(bits as *mut u32, (w * h) as usize);
+        for p in all.iter_mut() {
+            *p = 0;
+        }
+        Some(Surface {
+            dc,
+            bmp,
+            bits: bits as *mut u32,
+            w,
+            h,
+        })
+    }
+
+    /// Turns the rounded-rect outline into an alpha mask.
+    ///
+    /// GDI drawing writes no alpha, so the channel is rebuilt here: opaque
+    /// inside the panel, transparent outside, one pixel of coverage on the
+    /// corners. Interior RGB is premultiplied as `AC_SRC_ALPHA` requires.
+    unsafe fn mask_round(&self, rc: RECT, radius: i32) {
+        let r = radius as f32;
+        let (l, t, rr_, b) = (
+            rc.left as f32,
+            rc.top as f32,
+            rc.right as f32,
+            rc.bottom as f32,
+        );
+        let buf = std::slice::from_raw_parts_mut(self.bits, (self.w * self.h) as usize);
+        for y in 0..self.h {
+            let py = y as f32 + 0.5;
+            for x in 0..self.w {
+                let px = x as f32 + 0.5;
+                // Distance outside the rectangle, per axis.
+                let ox = if px < l {
+                    l - px
+                } else if px > rr_ {
+                    px - rr_
+                } else {
+                    0.0
+                };
+                let oy = if py < t {
+                    t - py
+                } else if py > b {
+                    py - b
+                } else {
+                    0.0
+                };
+                let sd = if ox > 0.0 || oy > 0.0 {
+                    (ox * ox + oy * oy).sqrt()
+                } else {
+                    // Inside: distance to the nearest corner arc.
+                    let qx = if px < l + r {
+                        l + r - px
+                    } else if px > rr_ - r {
+                        px - (rr_ - r)
+                    } else {
+                        0.0
+                    };
+                    let qy = if py < t + r {
+                        t + r - py
+                    } else if py > b - r {
+                        py - (b - r)
+                    } else {
+                        0.0
+                    };
+                    (qx * qx + qy * qy).sqrt() - r
+                };
+                let cov = (0.5 - sd).clamp(0.0, 1.0);
+                let a = (cov * 255.0 + 0.5) as u32;
+                let i = (y * self.w + x) as usize;
+                let p = buf[i];
+                buf[i] = if a == 0 {
+                    0
+                } else if a >= 255 {
+                    p | 0xFF00_0000
+                } else {
+                    let bl = (p & 0xFF) * a / 255;
+                    let gr = ((p >> 8) & 0xFF) * a / 255;
+                    let rd = ((p >> 16) & 0xFF) * a / 255;
+                    bl | (gr << 8) | (rd << 16) | (a << 24)
+                };
+            }
+        }
+    }
+
+    unsafe fn present(&self, hwnd: HWND) {
+        let size = SIZE {
+            cx: self.w,
+            cy: self.h,
+        };
+        let src = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        UpdateLayeredWindow(
+            hwnd,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &size,
+            self.dc,
+            &src,
+            0,
+            &blend,
+            ULW_ALPHA,
+        );
+    }
+
+    unsafe fn destroy(&self) {
+        DeleteObject(self.bmp as _);
+        DeleteObject(self.dc as _);
+    }
 }
 
 unsafe fn paint(hwnd: HWND) {
-    let mut ps: PAINTSTRUCT = std::mem::zeroed();
-    let hdc = BeginPaint(hwnd, &mut ps);
-
     let mut client: RECT = std::mem::zeroed();
     GetClientRect(hwnd, &mut client);
-
-    // Clear with the colour key so the desktop shows through.
-    let key_brush = CreateSolidBrush(KEY);
-    FillRect(hdc, &client, key_brush);
-    DeleteObject(key_brush);
-
-    let view = state().lock().unwrap().clone();
-    let Some(v) = view else {
-        if WAITING.load(Ordering::Relaxed) {
-            paint_waiting(hwnd, hdc);
-        }
-        EndPaint(hwnd, &ps);
+    let (w, h) = (client.right - client.left, client.bottom - client.top);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let Some(surf) = Surface::new(w, h) else {
         return;
     };
 
-    let (f_title, f_name, f_team, f_rank, f_small) = fonts();
-    let h = view_height(&v);
-
-    // Panel: rounded, 1 px edge. Radius is small so the colour-key corners stay
-    // tight and no magenta fringe survives on the outside.
-    let panel = RECT {
-        left: 10,
-        top: 10,
-        right: WIDTH - 10,
-        bottom: h - 10,
+    let view = state().lock().unwrap().clone();
+    let panel = match view {
+        Some(v) => draw_roster(surf.dc, &v, w, h),
+        None => {
+            if !WAITING.load(Ordering::Relaxed) {
+                surf.destroy();
+                return;
+            }
+            paint_waiting(hwnd, surf.dc)
+        }
     };
-    card(hdc, &panel, 8, BG, BORDER);
+    surf.mask_round(panel, PANEL_RADIUS);
+    surf.present(hwnd);
+    surf.destroy();
+}
+
+/// Draws the roster into `hdc` and returns the panel outline, which becomes the
+/// window's alpha mask.
+unsafe fn draw_roster(hdc: HDC, v: &View, w: i32, h: i32) -> RECT {
+    let (f_title, f_name, f_team, f_rank, f_small) = fonts();
+
+    // The panel now fills the window: with per-pixel alpha there is no colour
+    // key to keep away from the edge, so the old 10 px inset is dead space.
+    let panel = RECT {
+        left: 0,
+        top: 0,
+        right: w,
+        bottom: h,
+    };
+    card(hdc, &panel, PANEL_RADIUS, BG, HAIR);
 
     // Header: brand, map, then queue/state on one quiet line.
     let mut rc = RECT {
         left: PAD,
         top: 10,
-        right: WIDTH - PAD,
+        right: w - PAD,
         bottom: 32,
     };
     draw_text(hdc, f_title, "VALORANT", &mut rc, ACCENT, DT_LEFT);
@@ -616,7 +787,7 @@ unsafe fn paint(hwnd: HWND) {
     let mut rc2 = RECT {
         left: PAD,
         top: 12,
-        right: WIDTH - PAD,
+        right: w - PAD,
         bottom: 32,
     };
     let map_ko = crate::l10n::map_ko(&v.map).unwrap_or(v.map.as_str());
@@ -625,7 +796,7 @@ unsafe fn paint(hwnd: HWND) {
     let mut rc3 = RECT {
         left: PAD,
         top: 32,
-        right: WIDTH - PAD,
+        right: w - PAD,
         bottom: 50,
     };
     let sub = format!("{}  ·  {}", mode_label_of(&v.mode), state_label_of(&v.state));
@@ -634,9 +805,9 @@ unsafe fn paint(hwnd: HWND) {
     // No act ID means every rank below would be last season's value. Say it.
     if crate::ACT_UNKNOWN.load(Ordering::Relaxed) {
         let mut warn = RECT {
-            left: WIDTH / 2,
+            left: w / 2,
             top: 32,
-            right: WIDTH - PAD,
+            right: w - PAD,
             bottom: 50,
         };
         draw_text(
@@ -666,10 +837,12 @@ unsafe fn paint(hwnd: HWND) {
         ENEMY,
     );
 
+    divider(hdc, h - 30);
+
     let mut hint = RECT {
         left: PAD,
-        top: h - 24,
-        right: WIDTH - PAD,
+        top: h - 26,
+        right: w - PAD,
         bottom: h - 8,
     };
     draw_text(
@@ -683,13 +856,13 @@ unsafe fn paint(hwnd: HWND) {
 
     let mut brand = RECT {
         left: PAD,
-        top: h - 24,
-        right: WIDTH - PAD,
+        top: h - 26,
+        right: w - PAD,
         bottom: h - 8,
     };
     draw_text(hdc, f_small, "valtrack", &mut brand, MUTED, DT_RIGHT);
 
-    EndPaint(hwnd, &ps);
+    panel
 }
 
 /// Draws one team: coloured marker + name + lobby summary, then the rows.
@@ -706,30 +879,22 @@ unsafe fn team(
     f_small: HFONT,
     color: COLORREF,
 ) -> i32 {
-    // Team header: a tinted card with a colour bar on its left edge. Reads as a
-    // section title rather than another row of data.
-    let pill = RECT {
-        left: PAD - 6,
-        top: y - 4,
-        right: WIDTH - PAD + 6,
-        bottom: y + 20,
+    // Team label from the v0 mockup: a small tinted square, the team name in
+    // small caps, and the lobby summary pushed to the right edge. No card, no
+    // background — the rows below are the content, the label is a caption.
+    let dot = RECT {
+        left: PAD + 2,
+        top: y + 7,
+        right: PAD + 7,
+        bottom: y + 12,
     };
-    card(hdc, &pill, 7, SURFACE, DIVIDER);
-
-    // Colour bar flush inside the card's left edge.
-    let rail = RECT {
-        left: PAD - 5,
-        top: y - 3,
-        right: PAD - 1,
-        bottom: y + 19,
-    };
-    fill_round(hdc, &rail, 2, color);
+    fill(hdc, &dot, color);
 
     let mut rc = RECT {
-        left: PAD + 6,
-        top: y,
+        left: PAD + 12,
+        top: y + 1,
         right: WIDTH / 2,
-        bottom: y + 20,
+        bottom: y + 18,
     };
     draw_text(hdc, f_team, label, &mut rc, color, DT_LEFT);
 
@@ -741,13 +906,13 @@ unsafe fn team(
     }
     let mut sr = RECT {
         left: WIDTH / 2,
-        top: y + 3,
+        top: y + 2,
         right: WIDTH - PAD,
-        bottom: y + 20,
+        bottom: y + 18,
     };
     draw_text(hdc, f_small, &summary, &mut sr, MUTED, DT_RIGHT);
 
-    let mut ry = y + 26;
+    let mut ry = y + 20;
 
     if rows.is_empty() {
         let mut er = RECT {
@@ -779,132 +944,118 @@ unsafe fn team(
                 right: WIDTH - PAD,
                 bottom: ry,
             };
-            fill(hdc, &sep, DIVIDER);
+            fill(hdc, &sep, HAIR);
         }    }
     ry
 }
 
-/// One player: party rail, agent icon, name, stats, rank block.
+/// One player: agent icon, name, stats, party chip, rank icon + RR.
 unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_small: HFONT) {
     let party = row.party.filter(|n| *n >= 2);
     let pcolor = party.and_then(party_color);
 
-    // Local player: a full-width band plus an accent name. Beat any badge for
-    // "which one is me" at a glance in a ten-player lobby.
+    // Local player: raised surface only. No stripe, no border: the mockup reads
+    // better when the row is simply lifted out of the list.
     if row.is_me {
         let band = RECT {
-            left: 4,
+            left: PAD - 6,
             top: y,
-            right: WIDTH - 4,
+            right: WIDTH - PAD + 6,
             bottom: y + ROW_H,
         };
-        fill(hdc, &band, ME_ROW);
-        // A 2 px accent stripe marks the row without depending on the name colour.
-        let bar = RECT {
-            left: 4,
-            top: y,
-            right: 6,
-            bottom: y + ROW_H,
-        };
-        fill(hdc, &bar, ME_BAR);
+        fill_round(hdc, &band, 5, ME_ROW);
     }
 
-    // Party rail: the fastest way to spot a premade group.
-    if let Some(c) = pcolor {
-        let rail = RECT {
-            left: 7,
-            top: y + 5,
-            right: 10,
-            bottom: y + ROW_H - 5,
-        };
-        fill(hdc, &rail, c);
+    let icon_x = PAD;
+    // ICON_AGENT: resampled to this exact size at load, then blitted 1:1.
+    if let Some(icon) = crate::icons::agent_icon(&row.agent_id, ICON_AGENT) {
+        crate::icons::draw(hdc, &icon, icon_x, y + (ROW_H - ICON_AGENT) / 2, ICON_AGENT);
     }
 
-    if let Some(icon) = crate::icons::agent_icon(&row.agent_id) {
-        crate::icons::draw(hdc, &icon, PAD, y + 6, 28);
-    }
+    // Right column is fixed-width so every RR lines up.
+    let right = WIDTH - PAD;
+    let rr_x = right;
 
-    // Name column: stops well before the rank block so long KR names ellipsize.
+    // Name: stops before the party chip so long KR names ellipsize cleanly.
+    let name_left = icon_x + 32;
     let mut name_rc = RECT {
-        left: PAD + 34,
-        top: y + 1,
-        right: WIDTH - 118,
+        left: name_left,
+        top: y + 3,
+        right: right - 96,
         bottom: y + 21,
     };
     let name_color = if row.is_me { ACCENT } else { WHITE };
-    // `[S]` = streamer/incognito mode: the client hides this identity from
-    // everyone else, so we mark it instead of pretending the name is reliable.
+    // Streamer mode withholds the Riot ID. Nine rows of "hidden" identify
+    // nobody, so the agent name stands in.
     let name_text = if row.incognito {
-        format!("{}  [S]", row.name)
+        match crate::l10n::agent_ko(&row.agent_id) {
+            Some(agent) => format!("{agent}  [S]"),
+            None if !row.agent.is_empty() => format!("{}  [S]", row.agent),
+            None => "익명".to_string(),
+        }
     } else {
         row.name.clone()
     };
     draw_text(hdc, f_name, &name_text, &mut name_rc, name_color, DT_LEFT);
 
+    // Stat line: agent · winrate. Party size rides at the end of it.
     let mut parts = Vec::new();
     if let Some(ko) = crate::l10n::agent_ko(&row.agent_id) {
         parts.push(ko.to_string());
     } else if !row.agent.is_empty() {
         parts.push(row.agent.clone());
     }
-    if row.hide_level {
-        parts.push("레벨 -".to_string());
-    } else {
-        parts.push(format!("레벨 {}", row.level));
-    }
     if row.games > 0 {
         parts.push(format!(
-            "승률 {}%",
+            "{}%",
             (row.wins * 100 / row.games).clamp(0, 100)
         ));
     }
-    let sub = parts.join("  ·  ");
+    let sub = parts.join(" · ");
     let mut sub_rc = RECT {
-        left: PAD + 34,
+        left: name_left,
         top: y + 19,
-        right: WIDTH - 118,
-        bottom: y + 37,
+        right: right - 96,
+        bottom: y + 35,
     };
-    draw_text(hdc, f_small, &sub, &mut sub_rc, DIM, DT_LEFT);
+    draw_text(hdc, f_small, &sub, &mut sub_rc, MUTED, DT_LEFT);
 
-    // Party size, inline after the stat line so it never touches the rank block.
+    // Party chip, coloured per size: the fastest way to spot a premade.
     if let Some(n) = party {
         let label = party_label(Some(n));
         let sw = text_width(hdc, f_small, &sub);
         let lw = text_width(hdc, f_small, &label);
-        let right_limit = WIDTH - 118 - lw;
-        let px = (PAD + 34 + sw + 8).min(right_limit).max(PAD + 34);
+        let limit = right - 96 - lw;
+        let px = (name_left + sw + 7).min(limit).max(name_left);
         let mut pr = RECT {
             left: px,
             top: y + 19,
             right: px + lw + 2,
-            bottom: y + 37,
+            bottom: y + 35,
         };
-        draw_text(hdc, f_small, &label, &mut pr, pcolor.unwrap_or(DIM), DT_LEFT);
+        draw_text(hdc, f_small, &label, &mut pr, pcolor.unwrap_or(MUTED), DT_LEFT);
     }
 
-    if let Some(icon) = crate::icons::rank_icon(row.tier) {
-        crate::icons::draw(hdc, &icon, WIDTH - 114, y + 9, 20);
+    // Rank: icon + RR only. The tier name is redundant once the icon is legible
+    // and it was the element that overflowed at this width.
+    if let Some(icon) = crate::icons::rank_icon(row.tier, ICON_RANK) {
+        crate::icons::draw(
+            hdc,
+            &icon,
+            right - ICON_RANK - 30,
+            y + (ROW_H - ICON_RANK) / 2,
+            ICON_RANK,
+        );
     }
-
-    let tier_text = crate::rank::tier_name_ko(row.tier).to_string();
-    let mut tr = RECT {
-        left: WIDTH - 90,
-        top: y + 2,
-        right: WIDTH - 8,
-        bottom: y + 22,
-    };
-    draw_text(hdc, f_rank, &tier_text, &mut tr, WHITE, DT_RIGHT);
-
     if row.tier > 2 {
-        let rr_text = format!("{} RR", row.rr);
+        let rr_text = format!("{}", row.rr);
         let mut rr_rc = RECT {
-            left: WIDTH - 90,
-            top: y + 20,
-            right: WIDTH - 8,
-            bottom: y + 38,
+            left: rr_x - 28,
+            top: y + 9,
+            right: rr_x,
+            bottom: y + 27,
         };
-        draw_text(hdc, f_small, &rr_text, &mut rr_rc, DIM, DT_RIGHT);
+        draw_text(hdc, f_rank, &rr_text, &mut rr_rc, DIM, DT_RIGHT);
     }
 }
 
@@ -1072,7 +1223,9 @@ pub fn run(demo: bool) -> anyhow::Result<()> {
             anyhow::bail!("CreateWindowExW failed");
         }
 
-        SetLayeredWindowAttributes(hwnd, KEY, 0, LWA_COLORKEY);
+        // No colour key any more: the window is composited from a premultiplied
+        // RGBA bitmap with UpdateLayeredWindow. LWA_COLORKEY would force GDI to
+        // drop text anti-aliasing, which is what made the type look stepped.
 
         // WS_POPUP ignored the create-time x/y on this build, so place it once.
         SetWindowPos(

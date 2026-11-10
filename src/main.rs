@@ -1,6 +1,7 @@
 mod agent;
 mod assets;
 mod auth;
+mod fonts;
 mod icons;
 mod l10n;
 mod model;
