@@ -51,18 +51,22 @@ const MENU_TOGGLE: usize = 1;
 const MENU_QUIT: usize = 2;
 const MENU_UPDATE: usize = 3;
 
-const WIDTH: i32 = 392;
+const WIDTH: i32 = 500;
 const HEIGHT: i32 = 520;
-const ROW_H: i32 = 46;
+const ROW_H: i32 = 52;
 /// Corner radius of the panel and of the round popup controls.
 const PANEL_RADIUS: i32 = 10;
 /// Window height while no match is running.
 const WAITING_H: i32 = 104;
+/// Width reserved on the right for the rank bar, tier label and RR.
+const RANK_COL: i32 = 172;
+/// Height of the tier progress bar.
+const BAR_H: i32 = 4;
 /// Agent portrait and rank crest, in real device pixels. Icons are resampled to
 /// these sizes once at load, so they are drawn 1:1 instead of being scaled by
 /// AlphaBlend (which drops pixels and looks stair-stepped).
-const ICON_AGENT: i32 = 34;
-const ICON_RANK: i32 = 22;
+const ICON_AGENT: i32 = 38;
+const ICON_RANK: i32 = 24;
 /// Left edge of the content column (panel border + gutter).
 const PAD: i32 = 16;
 
@@ -71,7 +75,10 @@ fn rgb(r: u32, g: u32, b: u32) -> COLORREF {
 }
 
 const BG: COLORREF = 0x0010_0C0D;
+/// Row hairlines: barely-there separation between players.
 const HAIR: COLORREF = 0x002E_2226;
+/// Stronger rule, for the boundary between the name column and the rank column.
+const RULE: COLORREF = 0x0042_383D;
 const WHITE: COLORREF = 0x00F5_F1F2;
 const DIM: COLORREF = 0x0098_878B;
 const MUTED: COLORREF = 0x0058_4C69;
@@ -80,6 +87,8 @@ const ALLY: COLORREF = 0x00E7_5C6C;
 const ENEMY: COLORREF = 0x005C_A0E8;
 /// Local player's row background: one step up from the panel.
 const ME_ROW: COLORREF = 0x0020_1719;
+/// Unfilled part of the tier progress bar.
+const TRACK: COLORREF = 0x0036_2C31;
 
 /// Party size -> rail colour. Premade groups are the single most useful thing
 /// on this panel, so each size gets its own hue and a bar down the row.
@@ -115,9 +124,10 @@ fn avg_rank(rows: &[Row]) -> String {
 /// window and clip the last rows.
 fn view_height(v: &View) -> i32 {
     let rows = |n: usize| (n.max(1) as i32) * ROW_H;
-    // header (58) + ally label (20) + ally rows + gap (10) + enemy label (20)
-    // + enemy rows + footer (40, so the last row clears the hint line)
-    58 + 20 + rows(v.allies.len()) + 10 + 20 + rows(v.enemies.len()) + 46
+    // header (58) + ally label (22) + ally rows + gap (14) + enemy label (22)
+    // + enemy rows + footer (46). The gap and footer carry the breathing room:
+    // the last row must not touch the divider above the hint line.
+    58 + 22 + rows(v.allies.len()) + 14 + 22 + rows(v.enemies.len()) + 46
 }
 
 #[derive(Clone, Default)]
@@ -443,13 +453,14 @@ unsafe fn fonts() -> (HFONT, HFONT, HFONT, HFONT, HFONT) {
             ) as usize
         };
         // CleanerText / ClearType-ish smoothing is off by default for layered
-        // windows; these sizes match the v0 mockup's type ramp.
+        // windows; these sizes match the v0 mockup's type ramp, scaled up with
+        // the panel (392 -> 460 px).
         (
-            mk(15, FW_BOLD as i32),
-            mk(13, FW_BOLD as i32),
-            mk(11, FW_BOLD as i32),
-            mk(11, 600),
-            mk(10, FW_NORMAL as i32),
+            mk(17, FW_BOLD as i32),
+            mk(14, FW_BOLD as i32),
+            mk(12, FW_BOLD as i32),
+            mk(12, 600),
+            mk(11, FW_NORMAL as i32),
         )
     });
     (
@@ -897,17 +908,17 @@ unsafe fn team(
     // background — the rows below are the content, the label is a caption.
     let dot = RECT {
         left: PAD + 2,
-        top: y + 7,
-        right: PAD + 7,
-        bottom: y + 12,
+        top: y + 8,
+        right: PAD + 8,
+        bottom: y + 14,
     };
     fill(hdc, &dot, color);
 
     let mut rc = RECT {
-        left: PAD + 12,
-        top: y + 1,
+        left: PAD + 14,
+        top: y,
         right: WIDTH / 2,
-        bottom: y + 18,
+        bottom: y + 20,
     };
     draw_text(hdc, f_team, label, &mut rc, color, DT_LEFT);
 
@@ -919,13 +930,13 @@ unsafe fn team(
     }
     let mut sr = RECT {
         left: WIDTH / 2,
-        top: y + 2,
+        top: y + 1,
         right: WIDTH - PAD,
-        bottom: y + 18,
+        bottom: y + 20,
     };
     draw_text(hdc, f_small, &summary, &mut sr, MUTED, DT_RIGHT);
 
-    let mut ry = y + 20;
+    let mut ry = y + 22;
 
     if rows.is_empty() {
         let mut er = RECT {
@@ -993,9 +1004,9 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
     let name_left = icon_x + ICON_AGENT + 8;
     let mut name_rc = RECT {
         left: name_left,
-        top: y + 2,
-        right: right - 92,
-        bottom: y + 19,
+        top: y + 3,
+        right: right - RANK_COL,
+        bottom: y + 21,
     };
     let name_color = if row.is_me { ACCENT } else { WHITE };
     // Streamer mode withholds the Riot ID. Nine rows of "hidden" identify
@@ -1017,10 +1028,10 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         let level_text = format!("Lv {}", row.level);
         let level_w = text_width(hdc, f_small, &level_text);
         let mut lv_rc = RECT {
-            left: right - 92 - level_w - 4,
-            top: y + 3,
-            right: right - 92 - 4,
-            bottom: y + 18,
+            left: right - RANK_COL - level_w - 4,
+            top: y + 4,
+            right: right - RANK_COL - 4,
+            bottom: y + 20,
         };
         draw_text(hdc, f_small, &level_text, &mut lv_rc, MUTED, DT_RIGHT);
     }
@@ -1047,9 +1058,9 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
     let sub = parts.join("  ·  ");
     let mut sub_rc = RECT {
         left: name_left,
-        top: y + 18,
-        right: right - 92,
-        bottom: y + 34,
+        top: y + 19,
+        right: right - RANK_COL,
+        bottom: y + 36,
     };
     draw_text(hdc, f_small, &sub, &mut sub_rc, MUTED, DT_LEFT);
 
@@ -1058,13 +1069,13 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         let label = party_label(Some(n));
         let sw = text_width(hdc, f_small, &sub);
         let lw = text_width(hdc, f_small, &label);
-        let limit = right - 92 - lw;
+        let limit = right - RANK_COL - lw;
         let px = (name_left + sw + 7).min(limit).max(name_left);
         let mut pr = RECT {
             left: px,
-            top: y + 18,
+            top: y + 19,
             right: px + lw + 2,
-            bottom: y + 34,
+            bottom: y + 36,
         };
         draw_text(hdc, f_small, &label, &mut pr, pcolor.unwrap_or(MUTED), DT_LEFT);
     }
@@ -1120,14 +1131,6 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
             row.rr_earned
         ));
     }
-    if !risky {
-        if let Some(peak) = &row.peak {
-            let current = crate::rank::tier_name_ko(row.tier);
-            if !peak.is_empty() && !current.is_empty() && peak != current {
-                third.push(format!("최고 {peak}"));
-            }
-        }
-    }
     if !third.is_empty() {
         let color = if risky {
             rgb(0xD9, 0x5B, 0x66)
@@ -1140,7 +1143,7 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         };
         // Fit by dropping from the tail rather than letting GDI clip mid-word.
         // The items are already in priority order.
-        let avail = right - 92 - name_left;
+        let avail = right - RANK_COL - name_left;
         let mut text = third.join("  ·  ");
         while third.len() > 1 && text_width(hdc, f_small, &text) > avail {
             third.pop();
@@ -1148,33 +1151,133 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         }
         let mut tr = RECT {
             left: name_left,
-            top: y + 32,
-            right: right - 92,
+            top: y + 35,
+            right: right - RANK_COL,
             bottom: y + ROW_H - 1,
         };
         draw_text(hdc, f_small, &text, &mut tr, color, DT_LEFT);
     }
 
-    // Rank: icon + RR only. The tier name is redundant once the icon is legible
-    // and it was the element that overflowed at this width.
-    if let Some(icon) = crate::icons::rank_icon(row.tier, ICON_RANK) {
-        crate::icons::draw(
-            hdc,
-            &icon,
-            right - ICON_RANK - 34,
-            y + (ROW_H - ICON_RANK) / 2,
-            ICON_RANK,
-        );
-    }
+    // Rank block, right-aligned: crest, current tier and RR on the upper line,
+    // peak tier underneath. The panel is wide enough now to spell the tier out,
+    // which the crest alone could not do at 392 px.
+    // Rank block: a tier progress bar with the tier name above it and the peak
+    // underneath. A crested icon only said *which* tier; a bar also says how far
+    // into it the player is, and leaves room to show the peak on the same line.
+    let col_left = right - RANK_COL;
+    let col_w = RANK_COL;
+
+    // Vertical hairline: the rank column is a distinct field, not a continuation
+    // of the name. Without it the level and the tier ran together as one string.
+    let sep = RECT {
+        left: col_left - 12,
+        top: y + 8,
+        right: col_left - 11,
+        bottom: y + ROW_H - 8,
+    };
+    fill(hdc, &sep, RULE);
+
     if row.tier > 2 {
-        let rr_text = format!("{}", row.rr);
+        let tier = crate::rank::tier_name_ko(row.tier);
+
+        // Upper line: tier name left, RR right.
+        let rr_text = format!("{} RR", row.rr);
         let mut rr_rc = RECT {
-            left: rr_x - 32,
-            top: y + (ROW_H - 16) / 2,
-            right: rr_x,
-            bottom: y + (ROW_H + 16) / 2,
+            left: col_left,
+            top: y + 4,
+            right: col_left + col_w,
+            bottom: y + 20,
         };
-        draw_text(hdc, f_rank, &rr_text, &mut rr_rc, DIM, DT_RIGHT);
+        draw_text(hdc, f_small, &rr_text, &mut rr_rc, DIM, DT_RIGHT);
+
+        let rr_w = text_width(hdc, f_small, &rr_text);
+        let mut tr = RECT {
+            left: col_left,
+            top: y + 4,
+            right: col_left + col_w - rr_w - 6,
+            bottom: y + 20,
+        };
+        draw_text(hdc, f_rank, tier, &mut tr, WHITE, DT_LEFT);
+
+        // Bar: money occupied inside the current tier, 0..100 RR. Two notches
+        // mark the division boundaries so the fill reads as progress through a
+        // tier rather than as an arbitrary gauge.
+        let bar_top = y + 22;
+        let track = RECT {
+            left: col_left,
+            top: bar_top,
+            right: col_left + col_w,
+            bottom: bar_top + BAR_H,
+        };
+        fill_round(hdc, &track, 2, TRACK);
+        let pct = (row.rr.clamp(0, 100) as f32 / 100.0).max(0.06);
+        let filled_w = ((col_w as f32) * pct) as i32;
+        let bar = RECT {
+            left: col_left,
+            top: bar_top,
+            right: col_left + filled_w.max(2),
+            bottom: bar_top + BAR_H,
+        };
+        fill_round(hdc, &bar, 2, tier_color(row.tier));
+        // Notches last, so the fill cannot paint over them. They mark the two
+        // division boundaries: the fill still means "RR inside this division".
+        for third in [1, 2] {
+            let x = col_left + col_w * third / 3;
+            let notch = RECT {
+                left: x,
+                top: bar_top,
+                right: x + 1,
+                bottom: bar_top + BAR_H,
+            };
+            fill(hdc, &notch, BG);
+        }
+
+        // Peak, when it beats the current tier.
+        if let Some(peak) = &row.peak {
+            if !peak.is_empty() && peak != tier {
+                let text = format!("최고 {peak}");
+                let mut pr = RECT {
+                    left: col_left,
+                    top: y + 28,
+                    right: col_left + col_w,
+                    bottom: y + 44,
+                };
+                draw_text(hdc, f_small, &text, &mut pr, MUTED, DT_LEFT);
+            }
+        }
+    } else {
+        let mut tr = RECT {
+            left: col_left,
+            top: y + 6,
+            right: col_left + col_w,
+            bottom: y + 24,
+        };
+        draw_text(hdc, f_rank, "미배치", &mut tr, MUTED, DT_LEFT);
+        let bar_top = y + 26;
+        let track = RECT {
+            left: col_left,
+            top: bar_top,
+            right: col_left + col_w,
+            bottom: bar_top + BAR_H,
+        };
+        fill_round(hdc, &track, 2, TRACK);
+    }
+}
+
+/// Tier band colour: one hue per rank group, so the bar reads at a glance
+/// without needing the label.
+fn tier_color(tier: i64) -> COLORREF {
+    match tier {
+        3..=5 => rgb(0x7A, 0x7A, 0x82),   // Iron
+        6..=8 => rgb(0xA8, 0x76, 0x4C),   // Bronze
+        9..=11 => rgb(0xA9, 0xAE, 0xB8),  // Silver
+        12..=14 => rgb(0xD8, 0xA8, 0x4A), // Gold
+        15..=17 => rgb(0x4C, 0xB8, 0xB0), // Platinum
+        18..=20 => rgb(0xB0, 0x7C, 0xD8), // Diamond
+        21..=23 => rgb(0x5C, 0xB8, 0x7A), // Ascendant
+        24..=26 => rgb(0xD8, 0x54, 0x5C), // Immortal
+        27 => rgb(0xF0, 0xD8, 0x8C),      // Radiant
+        _ => MUTED,
     }
 }
 
