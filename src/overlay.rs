@@ -16,7 +16,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
-    FillRect, GetDC, GetTextExtentPoint32W, InvalidateRect, ReleaseDC, SelectObject, SetBkMode,
+    FillRect, GetDC, GetTextExtentPoint32W, ReleaseDC, SelectObject, SetBkMode,
     SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
     DIB_RGB_COLORS, HBITMAP, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_END_ELLIPSIS, DT_LEFT,
     DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD, FW_NORMAL, HDC, HFONT,
@@ -53,7 +53,7 @@ const MENU_UPDATE: usize = 3;
 
 const WIDTH: i32 = 392;
 const HEIGHT: i32 = 520;
-const ROW_H: i32 = 36;
+const ROW_H: i32 = 46;
 /// Corner radius of the panel and of the round popup controls.
 const PANEL_RADIUS: i32 = 10;
 /// Window height while no match is running.
@@ -61,7 +61,7 @@ const WAITING_H: i32 = 104;
 /// Agent portrait and rank crest, in real device pixels. Icons are resampled to
 /// these sizes once at load, so they are drawn 1:1 instead of being scaled by
 /// AlphaBlend (which drops pixels and looks stair-stepped).
-const ICON_AGENT: i32 = 24;
+const ICON_AGENT: i32 = 34;
 const ICON_RANK: i32 = 22;
 /// Left edge of the content column (panel border + gutter).
 const PAD: i32 = 16;
@@ -116,8 +116,8 @@ fn avg_rank(rows: &[Row]) -> String {
 fn view_height(v: &View) -> i32 {
     let rows = |n: usize| (n.max(1) as i32) * ROW_H;
     // header (58) + ally label (20) + ally rows + gap (10) + enemy label (20)
-    // + enemy rows + footer (44, so the last row never touches the hint line)
-    58 + 20 + rows(v.allies.len()) + 10 + 20 + rows(v.enemies.len()) + 44
+    // + enemy rows + footer (40, so the last row clears the hint line)
+    58 + 20 + rows(v.allies.len()) + 10 + 20 + rows(v.enemies.len()) + 46
 }
 
 #[derive(Clone, Default)]
@@ -173,7 +173,8 @@ fn demo_view() -> View {
                lv: i64,
                party: Option<u8>,
                w: i64,
-               g: i64| Row {
+               g: i64,
+               earned: i64| Row {
         puuid: String::new(),
         is_me: false,
         name: n.to_string(),
@@ -185,6 +186,7 @@ fn demo_view() -> View {
         agent_id: agent_id.to_string(),
         tier,
         rr,
+        rr_earned: earned,
         party,
         wins: w,
         games: g,
@@ -200,14 +202,14 @@ fn demo_view() -> View {
         mode: "competitive".into(),
         state: "IN_PROGRESS".into(),
         allies: vec![
-            row("빨리자라#4141", "Jett", JETT, 18, 59, 87, Some(3), 10, 23),
-            row("주인님구해요#2222", "Astra", ASTRA, 15, 49, 96, Some(3), 14, 20),
-            row("공주등장#바보멍청이", "Chamber", CHAMBER, 9, 5, 12, None, 3, 9),
-            row("그럼에도 불구하고#사랑해야지", "Omen", OMEN, 21, 56, 41, Some(2), 31, 55),
-            row("hidden", "Sage", SAGE, 14, 63, 177, Some(2), 9, 18),
+            row("빨리자라#4141", "Jett", JETT, 18, 59, 87, Some(3), 10, 23, 21),
+            row("주인님구해요#2222", "Astra", ASTRA, 15, 49, 96, Some(3), 14, 20, 18),
+            row("공주등장#바보멍청이", "Chamber", CHAMBER, 9, 5, 12, None, 3, 9, -12),
+            row("그럼에도 불구하고#사랑해야지", "Omen", OMEN, 21, 56, 41, Some(2), 31, 55, 24),
+            row("hidden", "Sage", SAGE, 14, 63, 177, Some(2), 9, 18, 19),
         ],
         enemies: (1..=5)
-            .map(|i| row("hidden", "Raze", RAZE, 16, 31, i * 20, Some(5), i * 3, 20))
+            .map(|i| row("hidden", "Raze", RAZE, 16, 31, i * 20, Some(5), i * 3, 20, -20))
             .collect(),
     }
 }
@@ -269,7 +271,9 @@ unsafe fn toggle(hwnd: HWND) {
 
     if next {
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        InvalidateRect(hwnd, std::ptr::null(), 0);
+        // Same reason as WM_REFRESH: the layered surface only exists after a
+        // present(), so repaint here rather than waiting for WM_PAINT.
+        paint(hwnd);
     } else {
         ShowWindow(hwnd, SW_HIDE);
     }
@@ -976,13 +980,13 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
     let right = WIDTH - PAD;
     let rr_x = right;
 
-    // Name: stops before the party chip so long KR names ellipsize cleanly.
-    let name_left = icon_x + 32;
+    // Name: stops before the rank block so long KR names ellipsize cleanly.
+    let name_left = icon_x + ICON_AGENT + 8;
     let mut name_rc = RECT {
         left: name_left,
-        top: y + 3,
-        right: right - 96,
-        bottom: y + 21,
+        top: y + 2,
+        right: right - 92,
+        bottom: y + 19,
     };
     let name_color = if row.is_me { ACCENT } else { WHITE };
     // Streamer mode withholds the Riot ID. Nine rows of "hidden" identify
@@ -998,7 +1002,21 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
     };
     draw_text(hdc, f_name, &name_text, &mut name_rc, name_color, DT_LEFT);
 
-    // Stat line: agent · winrate. Party size rides at the end of it.
+    // Level, right after the name's slot but before the rank block: a small
+    // number most players glance at to judge account age.
+    if !row.hide_level && row.level > 0 {
+        let level_text = format!("Lv {}", row.level);
+        let level_w = text_width(hdc, f_small, &level_text);
+        let mut lv_rc = RECT {
+            left: right - 92 - level_w - 4,
+            top: y + 3,
+            right: right - 92 - 4,
+            bottom: y + 18,
+        };
+        draw_text(hdc, f_small, &level_text, &mut lv_rc, MUTED, DT_RIGHT);
+    }
+
+    // Second line: agent · win record · party. Every fact we hold, packed.
     let mut parts = Vec::new();
     if let Some(ko) = crate::l10n::agent_ko(&row.agent_id) {
         parts.push(ko.to_string());
@@ -1006,17 +1024,22 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         parts.push(row.agent.clone());
     }
     if row.games > 0 {
+        // games is the total count, so 10/23 would read as a win/loss record.
         parts.push(format!(
-            "{}%",
+            "{}승 {}판 {}%",
+            row.wins,
+            row.games,
             (row.wins * 100 / row.games).clamp(0, 100)
         ));
+    } else {
+        parts.push("경쟁 기록 없음".to_string());
     }
-    let sub = parts.join(" · ");
+    let sub = parts.join("  ·  ");
     let mut sub_rc = RECT {
         left: name_left,
-        top: y + 19,
-        right: right - 96,
-        bottom: y + 35,
+        top: y + 18,
+        right: right - 92,
+        bottom: y + 34,
     };
     draw_text(hdc, f_small, &sub, &mut sub_rc, MUTED, DT_LEFT);
 
@@ -1025,15 +1048,32 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         let label = party_label(Some(n));
         let sw = text_width(hdc, f_small, &sub);
         let lw = text_width(hdc, f_small, &label);
-        let limit = right - 96 - lw;
+        let limit = right - 92 - lw;
         let px = (name_left + sw + 7).min(limit).max(name_left);
         let mut pr = RECT {
             left: px,
-            top: y + 19,
+            top: y + 18,
             right: px + lw + 2,
-            bottom: y + 35,
+            bottom: y + 34,
         };
         draw_text(hdc, f_small, &label, &mut pr, pcolor.unwrap_or(MUTED), DT_LEFT);
+    }
+
+    // Third line: rank trend. Only ranked players have one.
+    if row.tier > 2 && row.rr_earned != 0 {
+        let (sign, color) = if row.rr_earned > 0 {
+            ("+", rgb(0x6E, 0xC2, 0x8A))
+        } else {
+            ("", rgb(0xD9, 0x5B, 0x66))
+        };
+        let trend = format!("최근 {sign}{} RR", row.rr_earned);
+        let mut tr = RECT {
+            left: name_left,
+            top: y + 32,
+            right: right - 92,
+            bottom: y + ROW_H - 1,
+        };
+        draw_text(hdc, f_small, &trend, &mut tr, color, DT_LEFT);
     }
 
     // Rank: icon + RR only. The tier name is redundant once the icon is legible
@@ -1042,7 +1082,7 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         crate::icons::draw(
             hdc,
             &icon,
-            right - ICON_RANK - 30,
+            right - ICON_RANK - 34,
             y + (ROW_H - ICON_RANK) / 2,
             ICON_RANK,
         );
@@ -1050,10 +1090,10 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
     if row.tier > 2 {
         let rr_text = format!("{}", row.rr);
         let mut rr_rc = RECT {
-            left: rr_x - 28,
-            top: y + 9,
+            left: rr_x - 32,
+            top: y + (ROW_H - 16) / 2,
             right: rr_x,
-            bottom: y + 27,
+            bottom: y + (ROW_H + 16) / 2,
         };
         draw_text(hdc, f_rank, &rr_text, &mut rr_rc, DIM, DT_RIGHT);
     }
@@ -1101,12 +1141,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 );
             }
 
+            // With UpdateLayeredWindow the window has no painted surface until
+            // the first present() call, so ShowWindow alone leaves an invisible
+            // window: paint directly instead of waiting for WM_PAINT.
             if has && VISIBLE.load(Ordering::Relaxed) {
                 ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                InvalidateRect(hwnd, std::ptr::null(), 0);
+                paint(hwnd);
             } else if WAITING.load(Ordering::Relaxed) {
                 ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                InvalidateRect(hwnd, std::ptr::null(), 0);
+                paint(hwnd);
             } else {
                 ShowWindow(hwnd, SW_HIDE);
             }
@@ -1141,7 +1184,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         WM_TIMER => {
-            InvalidateRect(hwnd, std::ptr::null(), 0);
+            // Safety-net repaint. A layered window keeps its last present()
+            // image, but this also catches the case where the first present
+            // happened before the window was on screen.
+            if VISIBLE.load(Ordering::Relaxed) || WAITING.load(Ordering::Relaxed) {
+                paint(hwnd);
+            }
             0
         }
         WM_DESTROY => {
@@ -1325,8 +1373,25 @@ pub fn run(demo: bool) -> anyhow::Result<()> {
         if demo {
             VISIBLE.store(true, Ordering::Relaxed);
             HAD_MATCH.store(true, Ordering::Relaxed);
+            // Demo skips the polling worker, so size the window here too.
+            let h = state()
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(view_height)
+                .unwrap_or(HEIGHT)
+                .min(GetSystemMetrics(SM_CYSCREEN) - 48);
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                x,
+                y,
+                WIDTH,
+                h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            InvalidateRect(hwnd, std::ptr::null(), 0);
+            paint(hwnd);
         }
 
         let mut msg: MSG = std::mem::zeroed();

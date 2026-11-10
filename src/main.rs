@@ -95,6 +95,9 @@ pub struct Row {
     pub tier: i64,
     /// Ranked rating for the current act (only meaningful with `tier`).
     pub rr: i64,
+    /// RR gained or lost in the most recent ranked match. A player trending up
+    /// is a different opponent from one bleeding points, even at the same tier.
+    pub rr_earned: i64,
     /// Size of this player's party, when it can be inferred.
     pub party: Option<u8>,
     /// Wins / games in the current act (0 when unknown).
@@ -379,6 +382,8 @@ pub fn enrich_lobby(riot: &riot::Riot, lobby: &mut Lobby) {
                 }
                 _ => {}
             }
+            // Trend, independent of which branch above supplied the rank.
+            row.rr_earned = m.latest.rr_earned;
 
             // Placement games show tier 0 but still have a match count.
             if row.games == 0 {
@@ -591,6 +596,7 @@ fn row_of(p: &model::GamePlayer) -> Row {
         agent_id: p.character_id.clone().unwrap_or_default(),
         tier: p.competitive_tier,
         rr: 0,
+        rr_earned: 0,
         party: None,
         wins: 0,
         games: 0,
