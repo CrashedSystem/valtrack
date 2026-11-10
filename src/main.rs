@@ -239,7 +239,51 @@ fn diag() -> Result<()> {
             println!("(unavailable)");
         }
     }
+    diag_lobby(&riot);
     Ok(())
+}
+
+/// One line per lobby player with the fields the overlay acts on, so the
+/// penalty and demotion flags can be checked against a real lobby.
+fn diag_lobby(riot: &riot::Riot) {
+    let Ok(Some(lobby)) = fetch_lobby(riot) else {
+        return;
+    };
+    let mut ids: Vec<String> = lobby.allies.iter().map(|r| r.puuid.clone()).collect();
+    ids.extend(lobby.enemies.iter().map(|r| r.puuid.clone()));
+    let names = riot.names(&ids).unwrap_or_default();
+    let mmrs = riot.mmr_all(&ids);
+
+    println!();
+    println!("=== lobby penalty / demotion ===");
+    println!(
+        "{:<24} {:>5} {:>4} {:>5} {:>7} {:>6}",
+        "player", "tier", "rr", "derank", "protect", "afk"
+    );
+    for id in &ids {
+        let label = names
+            .get(id)
+            .map(|n| {
+                if !n.game_name.is_empty() {
+                    format!("{}#{}", n.game_name, n.tag_line)
+                } else {
+                    n.display_name.clone()
+                }
+            })
+            .unwrap_or_else(|| id.chars().take(8).collect());
+        match mmrs.get(id) {
+            Some(m) => println!(
+                "{:<24} {:>5} {:>4} {:>5} {:>7} {:>6}",
+                label,
+                m.latest.tier,
+                m.latest.rr,
+                if m.at_derank_tier { "yes" } else { "-" },
+                m.derank_games_left,
+                m.latest.afk_penalty
+            ),
+            None => println!("{:<24} (mmr unavailable)", label),
+        }
+    }
 }
 
 pub fn connect() -> Result<riot::Riot> {
