@@ -272,15 +272,21 @@ fn diag_lobby(riot: &riot::Riot) {
             })
             .unwrap_or_else(|| id.chars().take(8).collect());
         match mmrs.get(id) {
-            Some(m) => println!(
-                "{:<24} {:>5} {:>4} {:>5} {:>7} {:>6}",
-                label,
-                m.latest.tier,
-                m.latest.rr,
-                if m.at_derank_tier { "yes" } else { "-" },
-                m.derank_games_left,
-                m.latest.afk_penalty
-            ),
+            Some(m) => {
+                // Same rule the overlay uses: a demotion match needs 0 RR at the
+                // bottom division. Printing the raw flag made the table claim
+                // "derank" for a player still sitting on 74 RR.
+                let demotion = m.at_derank_tier && m.latest.rr == 0;
+                println!(
+                    "{:<24} {:>5} {:>4} {:>5} {:>7} {:>6}",
+                    label,
+                    m.latest.tier,
+                    m.latest.rr,
+                    if demotion { "yes" } else { "-" },
+                    m.derank_games_left,
+                    m.latest.afk_penalty
+                )
+            }
             None => println!("{:<24} (mmr unavailable)", label),
         }
     }
