@@ -174,11 +174,14 @@ pub struct SeasonInfo {
     pub wins: i64,
 }
 
-/// `pd.../match-details/v1/matches/{id}` — the only live source of party IDs.
+/// `pd.../match-details/v1/matches/{id}` — the only live source of party IDs,
+/// and the only way to tell whether a finished match was won or lost.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct MatchDetails {
     #[serde(default)]
     pub players: Vec<MatchDetailPlayer>,
+    #[serde(rename = "teams", default)]
+    pub teams: Vec<MatchDetailTeam>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -187,4 +190,18 @@ pub struct MatchDetailPlayer {
     pub subject: String,
     #[serde(rename = "partyId", default)]
     pub party_id: String,
+    #[serde(rename = "teamId", default)]
+    pub team_id: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MatchDetailTeam {
+    #[serde(rename = "teamId", default)]
+    pub team_id: String,
+    /// Rounds won. The higher of the two is the winner; a draw has 0 for both
+    /// or equal values, which the caller treats as "not a win".
+    #[serde(rename = "roundsWon", default)]
+    pub rounds_won: i64,
+    #[serde(rename = "won", default)]
+    pub won: bool,
 }

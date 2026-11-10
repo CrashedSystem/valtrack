@@ -187,6 +187,7 @@ fn demo_view() -> View {
         tier,
         rr,
         rr_earned: earned,
+        streak: if earned > 0 { 3 } else if earned < 0 { -2 } else { 0 },
         party,
         wins: w,
         games: g,
@@ -1060,21 +1061,40 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         draw_text(hdc, f_small, &label, &mut pr, pcolor.unwrap_or(MUTED), DT_LEFT);
     }
 
-    // Third line: rank trend. Only ranked players have one.
-    if row.tier > 2 && row.rr_earned != 0 {
-        let (sign, color) = if row.rr_earned > 0 {
-            ("+", rgb(0x6E, 0xC2, 0x8A))
+    // Third line: streak and rank trend. Streak leads because "3연패" changes
+    // how you read a player more than a single match's RR.
+    let mut third = Vec::new();
+    if row.streak != 0 {
+        let n = row.streak.unsigned_abs();
+        third.push(if row.streak > 0 {
+            format!("{n}연승 중")
         } else {
-            ("", rgb(0xD9, 0x5B, 0x66))
+            format!("{n}연패 중")
+        });
+    }
+    if row.tier > 2 && row.rr_earned != 0 {
+        third.push(format!(
+            "최근 {}{} RR",
+            if row.rr_earned > 0 { "+" } else { "" },
+            row.rr_earned
+        ));
+    }
+    if !third.is_empty() {
+        let color = if row.streak > 0 || (row.streak == 0 && row.rr_earned > 0) {
+            rgb(0x6E, 0xC2, 0x8A)
+        } else if row.streak < 0 || row.rr_earned < 0 {
+            rgb(0xD9, 0x5B, 0x66)
+        } else {
+            MUTED
         };
-        let trend = format!("최근 {sign}{} RR", row.rr_earned);
+        let text = third.join("  ·  ");
         let mut tr = RECT {
             left: name_left,
             top: y + 32,
             right: right - 92,
             bottom: y + ROW_H - 1,
         };
-        draw_text(hdc, f_small, &trend, &mut tr, color, DT_LEFT);
+        draw_text(hdc, f_small, &text, &mut tr, color, DT_LEFT);
     }
 
     // Rank: icon + RR only. The tier name is redundant once the icon is legible

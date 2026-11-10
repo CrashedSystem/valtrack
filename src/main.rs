@@ -98,6 +98,9 @@ pub struct Row {
     /// RR gained or lost in the most recent ranked match. A player trending up
     /// is a different opponent from one bleeding points, even at the same tier.
     pub rr_earned: i64,
+    /// Current streak: positive = wins in a row, negative = losses. Zero when
+    /// unknown or the last result was undetermined.
+    pub streak: i32,
     /// Size of this player's party, when it can be inferred.
     pub party: Option<u8>,
     /// Wins / games in the current act (0 when unknown).
@@ -462,7 +465,45 @@ pub fn enrich_lobby(riot: &riot::Riot, lobby: &mut Lobby) {
     for row in lobby.allies.iter_mut().chain(lobby.enemies.iter_mut()) {
         row.party = sizes.get(&row.puuid).copied();
     }
+
+    // Streaks. Each player costs up to STREAK_MATCHES match-details calls, so
+    // this runs in parallel across the lobby and stops at the first reversal
+    // inside recent_results(). Players whose history is unavailable stay at 0
+    // and the overlay simply omits the line.
+    let all_ids: Vec<String> = lobby
+        .allies
+        .iter()
+        .chain(lobby.enemies.iter())
+        .map(|r| r.puuid.clone())
+        .collect();
+    let mut streaks: HashMap<String, i32> = HashMap::new();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = all_ids
+            .iter()
+            .map(|p| {
+                let me = &*riot;
+                scope.spawn(move || (p.clone(), me.recent_results(p, STREAK_MATCHES, STREAK_CAP)))
+            })
+            .collect();
+        for h in handles {
+            if let Ok((puuid, results)) = h.join() {
+                let Some(&first) = results.first() else {
+                    continue;
+                };
+                let run = results.iter().take_while(|w| **w == first).count() as i32;
+                // A single result is a real 1-game streak, not noise: label it.
+                streaks.insert(puuid, if first { run } else { -run });
+            }
+        }
+    });
+    for row in lobby.allies.iter_mut().chain(lobby.enemies.iter_mut()) {
+        row.streak = streaks.get(&row.puuid).copied().unwrap_or(0);
+    }
 }
+
+/// How far back to look for a streak, and when to stop counting.
+const STREAK_MATCHES: usize = 8;
+const STREAK_CAP: usize = 5;
 
 /// Agent UUID -> display name. Embedded (`assets.rs`), so no network at runtime.
 fn agent_map() -> HashMap<String, String> {
@@ -597,6 +638,7 @@ fn row_of(p: &model::GamePlayer) -> Row {
         tier: p.competitive_tier,
         rr: 0,
         rr_earned: 0,
+        streak: 0,
         party: None,
         wins: 0,
         games: 0,

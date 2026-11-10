@@ -345,6 +345,57 @@ impl Riot {
             .unwrap_or_default())
     }
 
+    /// Recent results for one player, newest first: `true` = win.
+    ///
+    /// Walks the match history newest-first and stops at the first result that
+    /// disagrees with the previous one, so the caller gets the length of the
+    /// current streak without fetching a fixed number of matches.
+    pub fn recent_results(&self, puuid: &str, max: usize, want: usize) -> Vec<bool> {
+        let ids = self.match_history(puuid).unwrap_or_default();
+        let mut out = Vec::new();
+        for id in ids.iter().take(max) {
+            let Ok(details) = self.match_details(id) else {
+                break;
+            };
+            let Some(win) = self.own_result(&details, puuid) else {
+                break;
+            };
+            out.push(win);
+            // A streak only needs the run up to the first reversal.
+            if out.len() >= want || out.first() != Some(&win) {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Whether *this player* won the given finished match, if it can be told.
+    fn own_result(&self, details: &MatchDetails, puuid: &str) -> Option<bool> {
+        let player = details.players.iter().find(|p| p.subject == puuid)?;
+        let team_id = player.team_id.as_str();
+        if team_id.is_empty() {
+            return None;
+        }
+        // Explicit `won` wins when present; otherwise compare rounds.
+        let team = details.teams.iter().find(|t| t.team_id == team_id)?;
+        if team.won {
+            return Some(true);
+        }
+        let best = details.teams.iter().map(|t| t.rounds_won).max().unwrap_or(0);
+        if best > 0 && team.rounds_won == best {
+            // Equal top scores mean a draw, which is neither a win nor a loss.
+            let tied = details
+                .teams
+                .iter()
+                .filter(|t| t.rounds_won == best)
+                .count();
+            if tied == 1 {
+                return Some(true);
+            }
+        }
+        Some(false)
+    }
+
     /// How the Overwolf app infers premade groups without a live party API:
     /// find matches that 2+ lobby players share, then read the `partyId`
     /// those players had *in that match*. Single-member groups are dropped
