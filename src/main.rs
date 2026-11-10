@@ -72,6 +72,8 @@ enum Cmd {
     Uninstall,
     /// Show what is installed, whether it runs at login, and whether it is live
     Status,
+    /// Dump the live API payloads so we can see which fields exist
+    Diag,
 }
 
 #[derive(Clone)]
@@ -101,6 +103,16 @@ pub struct Row {
     /// Current streak: positive = wins in a row, negative = losses. Zero when
     /// unknown or the last result was undetermined.
     pub streak: i32,
+    /// Highest tier this account has ever reached, as a Korean tier name. The
+    /// current act resets every few months; peak is the better skill signal.
+    pub peak: Option<String>,
+    /// Games of derank protection left. Meaningful only when `at_derank_tier`:
+    /// zero there means the next loss demotes.
+    pub derank_games: i64,
+    /// The rank sits at the bottom division of its tier, where demotion applies.
+    pub at_derank_tier: bool,
+    /// Riot has penalised this account for leaving or going AFK.
+    pub penalized: bool,
     /// Size of this player's party, when it can be inferred.
     pub party: Option<u8>,
     /// Wins / games in the current act (0 when unknown).
@@ -196,7 +208,38 @@ fn run() -> Result<()> {
         Cmd::Install => agent::install(),
         Cmd::Uninstall => agent::uninstall(),
         Cmd::Status => agent::status(),
+        Cmd::Diag => diag(),
     }
+}
+
+/// Dumps the live payloads we read so we can see what else they carry.
+fn diag() -> Result<()> {
+    let riot = connect()?;
+    for (name, url) in riot.debug_urls() {
+        match riot.debug_json(&url) {
+            Some(v) => {
+                println!("=== {name} ===");
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+            }
+            None => println!("=== {name} === (unavailable)"),
+        }
+    }
+    if let Some(id) = riot.active_match_id().ok().flatten() {
+        println!("=== match-details ({id}) ===");
+        if let Some(v) = riot.debug_match_details(&id) {
+            if let Some(players) = v.get("players").and_then(|p| p.as_array()) {
+                if let Some(first) = players.first() {
+                    println!("player: {first}");
+                }
+            }
+            if let Some(teams) = v.get("teams") {
+                println!("teams: {teams}");
+            }
+        } else {
+            println!("(unavailable)");
+        }
+    }
+    Ok(())
 }
 
 pub fn connect() -> Result<riot::Riot> {
@@ -387,6 +430,20 @@ pub fn enrich_lobby(riot: &riot::Riot, lobby: &mut Lobby) {
             }
             // Trend, independent of which branch above supplied the rank.
             row.rr_earned = m.latest.rr_earned;
+            // Peak history: the highest division-free tier they ever held.
+            if let Some((_, name)) = rank::peak_tier_ko(
+                &m.lifetime_prestige
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.count))
+                    .collect(),
+            ) {
+                row.peak = Some(name.to_string());
+            }
+            // Demotion risk. Only meaningful at the bottom division of a tier;
+            // elsewhere the flag is false and the overlay says nothing.
+            row.derank_games = m.derank_games_left;
+            row.at_derank_tier = m.at_derank_tier;
+            row.penalized = m.latest.afk_penalty != 0 || m.latest.rr_penalty != 0;
 
             // Placement games show tier 0 but still have a match count.
             if row.games == 0 {
@@ -639,6 +696,10 @@ fn row_of(p: &model::GamePlayer) -> Row {
         rr: 0,
         rr_earned: 0,
         streak: 0,
+        peak: None,
+        derank_games: 0,
+        at_derank_tier: false,
+        penalized: false,
         party: None,
         wins: 0,
         games: 0,

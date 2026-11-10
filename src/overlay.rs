@@ -188,6 +188,10 @@ fn demo_view() -> View {
         rr,
         rr_earned: earned,
         streak: if earned > 0 { 3 } else if earned < 0 { -2 } else { 0 },
+        peak: if earned > 0 { Some("다이아몬드 2".to_string()) } else { None },
+        derank_games: if earned < 0 { 0 } else { 2 },
+        at_derank_tier: earned < 0,
+        penalized: false,
         party,
         wins: w,
         games: g,
@@ -1061,8 +1065,7 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
         draw_text(hdc, f_small, &label, &mut pr, pcolor.unwrap_or(MUTED), DT_LEFT);
     }
 
-    // Third line: streak and rank trend. Streak leads because "3연패" changes
-    // how you read a player more than a single match's RR.
+    // Third line: streak, trend, then the two flags worth acting on.
     let mut third = Vec::new();
     if row.streak != 0 {
         let n = row.streak.unsigned_abs();
@@ -1079,8 +1082,31 @@ unsafe fn draw_row(hdc: HDC, row: &Row, y: i32, f_name: HFONT, f_rank: HFONT, f_
             row.rr_earned
         ));
     }
+    // Demotion risk and penalties outrank the peak label: both change how you
+    // read the player, and the peak is trivia once you know either.
+    let risky = row.at_derank_tier || row.penalized;
+    if row.at_derank_tier {
+        third.push(if row.derank_games > 0 {
+            format!("강등전 (보호 {}판)", row.derank_games)
+        } else {
+            "강등전 임박".to_string()
+        });
+    }
+    if row.penalized {
+        third.push("제재 이력".to_string());
+    }
+    if !risky {
+        if let Some(peak) = &row.peak {
+            let current = crate::rank::tier_name_ko(row.tier);
+            if !peak.is_empty() && !current.is_empty() && peak != current {
+                third.push(format!("최고 {peak}"));
+            }
+        }
+    }
     if !third.is_empty() {
-        let color = if row.streak > 0 || (row.streak == 0 && row.rr_earned > 0) {
+        let color = if risky {
+            rgb(0xD9, 0x5B, 0x66)
+        } else if row.streak > 0 || (row.streak == 0 && row.rr_earned > 0) {
             rgb(0x6E, 0xC2, 0x8A)
         } else if row.streak < 0 || row.rr_earned < 0 {
             rgb(0xD9, 0x5B, 0x66)

@@ -136,6 +136,14 @@ pub struct LatestCompetitiveUpdate {
     pub rr: i64,
     #[serde(rename = "RankedRatingEarned", default)]
     pub rr_earned: i64,
+    /// RR docked by Riot as a punishment; non-zero means the account was
+    /// penalised for that match.
+    #[serde(rename = "RRPenalty", default)]
+    pub rr_penalty: i64,
+    /// Escalating AFK/dodge penalty level. Any non-zero value means Riot has
+    /// flagged this account for leaving games.
+    #[serde(rename = "AFKPenalty", default)]
+    pub afk_penalty: i64,
     #[serde(rename = "SeasonID", default)]
     pub season_id: String,
 }
@@ -146,6 +154,25 @@ pub struct Mmr {
     pub latest: LatestCompetitiveUpdate,
     #[serde(rename = "QueueSkills", default)]
     pub queue_skills: QueueSkills,
+    /// How many times the account has ever reached each tier, keyed by tier
+    /// name ("DIAMOND", "IMMORTAL", ...). Peak history is a stronger signal of
+    /// skill than the current act, which resets.
+    #[serde(rename = "LifetimePrestige", default)]
+    pub lifetime_prestige: HashMap<String, PrestigeCount>,
+    /// Games of derank protection left at the bottom division of a tier. Zero
+    /// while `IsAtDerankProtectedTier` means the next loss drops them.
+    #[serde(rename = "DerankProtectedGamesRemaining", default)]
+    pub derank_games_left: i64,
+    /// True when the current rank sits at the bottom division of its tier, i.e.
+    /// where demotion is possible at all.
+    #[serde(rename = "IsAtDerankProtectedTier", default)]
+    pub at_derank_tier: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PrestigeCount {
+    #[serde(rename = "Count", default)]
+    pub count: i64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

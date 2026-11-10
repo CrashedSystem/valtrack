@@ -11,6 +11,32 @@ pub fn tier_name(tier: i64) -> &'static str {
     NAMES.get(tier as usize).copied().unwrap_or("Unknown")
 }
 
+/// Peak tier the account has ever reached, from the `LifetimePrestige` counts.
+///
+/// The keys are English tier names without a division ("DIAMOND", "ASCENDANT"),
+/// so this maps them back onto the numeric ladder and returns the highest one
+/// with a non-zero count. `Radiant` never appears there, so 27 is the ceiling.
+pub fn peak_tier_ko(counts: &std::collections::HashMap<String, i64>) -> Option<(i64, &'static str)> {
+    const KEYS: [(&str, i64); 8] = [
+        ("IRON", 3),
+        ("BRONZE", 6),
+        ("SILVER", 9),
+        ("GOLD", 12),
+        ("PLATINUM", 15),
+        ("DIAMOND", 18),
+        ("ASCENDANT", 21),
+        ("IMMORTAL", 24),
+    ];
+    let mut best: Option<(i64, &'static str)> = None;
+    for (key, tier) in KEYS {
+        let hit = counts.get(key).copied().unwrap_or(0) > 0;
+        if hit && best.map(|(t, _)| tier > t).unwrap_or(true) {
+            best = Some((tier, tier_name_ko(tier)));
+        }
+    }
+    best
+}
+
 pub fn rank_label(tier: i64, rr: i64) -> String {
     if tier <= 2 {
         "Unrated".to_string()

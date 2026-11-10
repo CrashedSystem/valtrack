@@ -215,6 +215,24 @@ impl Riot {
             .map(str::to_string)
     }
 
+    /// Raw JSON for a known endpoint. Used by `valtrack diag` to check which
+    /// fields the live payloads actually carry before we model them.
+    pub fn debug_json(&self, url: &str) -> Option<serde_json::Value> {
+        self.get_json(url)
+    }
+
+    pub fn debug_match_details(&self, match_id: &str) -> Option<serde_json::Value> {
+        let url = format!("{}/match-details/v1/matches/{}", self.pd(), match_id);
+        self.get_json(&url)
+    }
+
+    pub fn debug_urls(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("core-game", format!("{}/core-game/v1/players/{}", self.glz(), self.puuid)),
+            ("mmr", format!("{}/mmr/v1/players/{}", self.pd(), self.puuid)),
+        ]
+    }
+
     /// GET with one retry on 429. Used by the enrichment paths where a transient
     /// rate limit used to silently produce "Unrated" / missing party badges.
     fn get_json(&self, url: &str) -> Option<serde_json::Value> {
